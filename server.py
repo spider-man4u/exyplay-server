@@ -1,5 +1,5 @@
 """
-Exyplay Music Server (Enhanced)
+Exyplay Music Server
 Flask REST API wrapping ytmusicapi for the Exyplay Android app.
 Run: python server.py
 """
@@ -10,6 +10,7 @@ import os
 import json
 import logging
 from functools import wraps
+import yt_dlp  # 🌟 NEW: The audio streaming engine
 
 # ── ytmusicapi ──────────────────────────────────────────────────────────────
 from ytmusicapi import YTMusic
@@ -20,15 +21,13 @@ CORS(app)
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("exyplay")
 
-# ── Auth & Localization setup ───────────────────────────────────────────────
+# ── Auth setup ───────────────────────────────────────────────────────────────
 AUTH_FILE = os.getenv("YTMUSIC_AUTH_FILE", "browser.json")
 
 def _get_ytmusic(auth=True):
-    """Return a YTMusic instance with regional optimization."""
-    # Location set to "IN" to ensure highly relevant Indian charts and recommendations
     if auth and os.path.exists(AUTH_FILE):
-        return YTMusic(AUTH_FILE, language="en", location="IN")
-    return YTMusic(language="en", location="IN")
+        return YTMusic(AUTH_FILE, language="en")
+    return YTMusic(language="en")
 
 _ytm_public = _get_ytmusic(auth=False)
 _ytm_auth   = None   
@@ -52,7 +51,6 @@ def err(msg, code=400):
     return jsonify({"status": "error", "message": str(msg)}), code
 
 def handle(fn):
-    """Decorator: catch exceptions and return JSON error."""
     @wraps(fn)
     def wrapper(*args, **kwargs):
         try:
@@ -63,23 +61,13 @@ def handle(fn):
     return wrapper
 
 def qp(name, default=None):
-    """Get query param."""
     return request.args.get(name, default)
 
 def qpi(name, default=None):
-    """Get integer query param. Passing 'all' bypasses pagination limits."""
     v = request.args.get(name)
-    if v is not None:
-        if v.lower() == "all":
-            return None
-        try:
-            return int(v)
-        except ValueError:
-            return default
-    return default
+    return int(v) if v is not None else default
 
 def qpb(name, default=False):
-    """Get boolean query param."""
     v = request.args.get(name, "").lower()
     if v in ("1", "true", "yes"):
         return True
@@ -95,12 +83,6 @@ def qpb(name, default=False):
 @app.route("/search")
 @handle
 def search():
-    """
-    GET /search?q=Oasis+Wonderwall
-    Optional: filter=songs|videos|albums|artists|playlists
-              limit=20 (or 'all')
-              ignore_spelling=false
-    """
     query = qp("q")
     if not query:
         return err("Missing query param: q")
@@ -117,18 +99,12 @@ def search():
 @app.route("/search/suggestions")
 @handle
 def search_suggestions():
-    """
-    GET /search/suggestions?q=fad
-    Optional: detailed=true (defaulted to True for Exyplay rich UI)
-    """
     query = qp("q")
     if not query:
         return err("Missing query param: q")
-    
-    # Enabled detailed runs for bolding typed text in the app UI
     results = get_ytm().get_search_suggestions(
         query=query,
-        detailed_runs=qpb("detailed", True),
+        detailed_runs=qpb("detailed"),
     )
     return ok(results)
 
@@ -140,21 +116,18 @@ def search_suggestions():
 @app.route("/home")
 @handle
 def home():
-    """GET /home?limit=6"""
     data = get_ytm().get_home(limit=qpi("limit", 6))
     return ok(data)
 
 @app.route("/artist/<channel_id>")
 @handle
 def get_artist(channel_id):
-    """GET /artist/<channelId>"""
     data = get_ytm().get_artist(channel_id)
     return ok(data)
 
 @app.route("/artist/<channel_id>/albums")
 @handle
 def get_artist_albums(channel_id):
-    """GET /artist/<channelId>/albums?params=<params>"""
     params = qp("params")
     if not params:
         return err("Missing query param: params")
@@ -164,28 +137,24 @@ def get_artist_albums(channel_id):
 @app.route("/album/<browse_id>")
 @handle
 def get_album(browse_id):
-    """GET /album/<browseId>"""
     data = get_ytm().get_album(browse_id)
     return ok(data)
 
 @app.route("/album/<browse_id>/browse-id")
 @handle
 def get_album_browse_id(browse_id):
-    """GET /album/<audioPlaylistId>/browse-id"""
     data = get_ytm().get_album_browse_id(browse_id)
     return ok(data)
 
 @app.route("/user/<channel_id>")
 @handle
 def get_user(channel_id):
-    """GET /user/<channelId>"""
     data = get_ytm().get_user(channel_id)
     return ok(data)
 
 @app.route("/user/<channel_id>/playlists")
 @handle
 def get_user_playlists(channel_id):
-    """GET /user/<channelId>/playlists?params=<params>"""
     params = qp("params")
     data = get_ytm().get_user_playlists(channel_id, params=params)
     return ok(data)
@@ -193,32 +162,24 @@ def get_user_playlists(channel_id):
 @app.route("/song/<video_id>")
 @handle
 def get_song(video_id):
-    """GET /song/<videoId>"""
     data = get_ytm().get_song(video_id)
     return ok(data)
 
 @app.route("/song/<video_id>/related")
 @handle
 def get_song_related(video_id):
-    """GET /song/<videoId>/related"""
     data = get_ytm().get_song_related(browse_id=video_id)
     return ok(data)
 
 @app.route("/lyrics/<browse_id>")
 @handle
 def get_lyrics(browse_id):
-    """
-    GET /lyrics/<browseId>?timestamps=true
-    Timestamps enabled by default for Karaoke-style scrolling in Exyplay.
-    """
-    timestamps = qpb("timestamps", True)
-    data = get_ytm().get_lyrics(browse_id, timestamps=timestamps)
+    data = get_ytm().get_lyrics(browse_id)
     return ok(data)
 
 @app.route("/tasteprofile")
 @handle
 def get_tasteprofile():
-    """GET /tasteprofile"""
     data = get_ytm().get_tasteprofile()
     return ok(data)
 
@@ -230,14 +191,12 @@ def get_tasteprofile():
 @app.route("/explore/moods")
 @handle
 def get_mood_categories():
-    """GET /explore/moods"""
     data = get_ytm().get_mood_categories()
     return ok(data)
 
 @app.route("/explore/mood-playlists")
 @handle
 def get_mood_playlists():
-    """GET /explore/mood-playlists?params=<params>"""
     params = qp("params")
     if not params:
         return err("Missing query param: params")
@@ -247,9 +206,7 @@ def get_mood_playlists():
 @app.route("/explore/charts")
 @handle
 def get_charts():
-    """GET /explore/charts?country=IN"""
-    # Defaulting to Indian charts
-    country = qp("country", "IN")
+    country = qp("country", "ZZ")
     data = get_ytm().get_charts(country=country)
     return ok(data)
 
@@ -261,10 +218,6 @@ def get_charts():
 @app.route("/watch")
 @handle
 def get_watch_playlist():
-    """
-    GET /watch?videoId=<id>
-    Optional: playlistId=<id>  limit=25  radio=false  shuffle=false
-    """
     video_id   = qp("videoId")
     playlist_id = qp("playlistId")
     if not video_id and not playlist_id:
@@ -287,20 +240,15 @@ def get_watch_playlist():
 @app.route("/playlist/<playlist_id>")
 @handle
 def get_playlist(playlist_id):
-    """GET /playlist/<playlistId>?limit=all"""
-    limit = qpi("limit")  
+    limit = qpi("limit")   
     data = get_ytm().get_playlist(playlist_id, limit=limit)
     return ok(data)
 
 @app.route("/playlist/<playlist_id>/suggestions")
 @handle
 def get_playlist_suggestions(playlist_id):
-    """GET /playlist/<playlistId>/suggestions"""
     data = get_ytm().get_playlist_suggestions(playlist_id)
     return ok(data)
-
-
-# ── Authenticated playlist mutations ─────────────────────────────────────────
 
 @app.route("/playlist", methods=["POST"])
 @handle
@@ -373,14 +321,12 @@ def move_playlist_item(playlist_id):
 @app.route("/library/playlists")
 @handle
 def get_library_playlists():
-    """GET /library/playlists?limit=25 (or 'all')"""
     data = get_ytm(needs_auth=True).get_library_playlists(limit=qpi("limit", 25))
     return ok(data)
 
 @app.route("/library/songs")
 @handle
 def get_library_songs():
-    """GET /library/songs?limit=25&order=a_to_z|z_to_a|recently_added"""
     data = get_ytm(needs_auth=True).get_library_songs(
         limit=qpi("limit", 25),
         order=qp("order"),
@@ -557,6 +503,30 @@ def delete_upload_entity(entity_id):
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# AUDIO STREAMING (YT-DLP) 🌟 NEW ENGINE ADDED HERE!
+# ════════════════════════════════════════════════════════════════════════════
+
+@app.route("/stream/<video_id>")
+@handle
+def get_stream_url(video_id):
+    """
+    GET /stream/<videoId>
+    Returns the direct high-quality audio URL for playback.
+    """
+    ydl_opts = {
+        'format': 'bestaudio[ext=m4a]/bestaudio',
+        'quiet': True,
+        'no_warnings': True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(
+            f"https://www.youtube.com/watch?v={video_id}",
+            download=False
+        )
+        return {"url": info["url"]}
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # STATUS
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -565,8 +535,8 @@ def status():
     auth_active = os.path.exists(AUTH_FILE)
     return jsonify({
         "status": "ok",
-        "server": "Exyplay Enhanced Music Server",
-        "version": "1.1.0",
+        "server": "Exyplay Music Server",
+        "version": "1.0.0",
         "ytmusicapi": "1.11.6",
         "auth_enabled": auth_active,
         "auth_file": AUTH_FILE if auth_active else None,
@@ -580,6 +550,6 @@ def status():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     debug = os.getenv("DEBUG", "false").lower() == "true"
-    log.info(f"🎵 Exyplay Enhanced Music Server starting on port {port}")
+    log.info(f"🎵 Exyplay Music Server starting on port {port}")
     log.info(f"   Auth: {'✅ ' + AUTH_FILE if os.path.exists(AUTH_FILE) else '⚠️  No auth — public endpoints only'}")
     app.run(host="0.0.0.0", port=port, debug=debug)

@@ -531,7 +531,7 @@ def delete_upload_entity(entity_id):
 def get_stream_url(video_id):
     """
     GET /stream/<videoId>
-    Tries mweb with PO Token plugin natively.
+    Tries mweb, web, and ios with PO Token plugin natively.
     """
     ORIGINAL_COOKIES = os.getenv("COOKIES_FILE", "/etc/secrets/cookies.txt")
     COOKIES_FILE = "/tmp/cookies.txt"
@@ -566,10 +566,11 @@ def get_stream_url(video_id):
             info = ydl.extract_info(yt_url, download=False)
         return info.get("url", ""), info.get("ext", "webm")
 
-    # yt-dlp Attempt order - Prioritizing mweb for PO token compatibility
+    # yt-dlp Attempt order - Prioritizing mweb/ios for PO token compatibility
     attempts = [
         ("mweb",         True),   # Mobile Web (Best for PO Tokens)
         ("web",          True),   # Desktop Web
+        ("ios",          True),   # iOS Client
         ("tv_embedded",  False),  # TV Fallback
         ("android",      False),  # Android Fallback
     ]
@@ -585,37 +586,6 @@ def get_stream_url(video_id):
             log.warning(f"⚠️  {label} returned empty URL")
         except Exception as e:
             log.warning(f"❌ {label} failed: {e}")
-
-    # COBALT API FALLBACK (Updated to v10 API)
-    log.info(f"🔄 Trying Cobalt API fallback for {video_id}")
-    try:
-        cobalt_headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "User-Agent": "Exyplay/1.0"
-        }
-        cobalt_body = {
-            "url": yt_url,
-            "downloadMode": "audio",
-            "audioFormat": "mp3"
-        }
-        
-        res = requests.post(
-            "https://api.cobalt.tools/",
-            json=cobalt_body,
-            headers=cobalt_headers,
-            timeout=8
-        )
-        
-        if res.status_code == 200:
-            data = res.json()
-            if "url" in data:
-                log.info(f"✅ Cobalt → {video_id}")
-                return ok({"url": data["url"], "ext": "mp3", 
-                           "videoId": video_id, "source": "cobalt"})
-        log.warning(f"Cobalt failed: HTTP {res.status_code} - {res.text}")
-    except Exception as e:
-        log.warning(f"Cobalt request failed: {e}")
 
     log.error(f"❌ All strategies exhausted for {video_id}")
     return err(
@@ -700,20 +670,6 @@ def stream_debug():
             results["cookies+mweb"] = f"❌ {str(e)[:100]}"
     else:
         results["cookies+mweb"] = f"⚠️  No cookies.txt at '{ORIGINAL_COOKIES}' or failed to copy to /tmp"
-
-    # Test Cobalt
-    try:
-        res = requests.post(
-            "https://api.cobalt.tools/",
-            json={"url": f"https://www.youtube.com/watch?v={test_id}", "downloadMode": "audio", "audioFormat": "mp3"},
-            headers={"Accept": "application/json", "Content-Type": "application/json", "User-Agent": "Exyplay/1.0"}
-        )
-        if res.status_code == 200 and "url" in res.json():
-            results["cobalt"] = "✅ WORKS"
-        else:
-            results["cobalt"] = f"❌ HTTP {res.status_code}"
-    except Exception as e:
-        results["cobalt"] = f"❌ {str(e)[:80]}"
 
     working = [k for k, v in results.items() if v.startswith("✅")]
     return ok({

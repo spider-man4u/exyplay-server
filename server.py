@@ -24,6 +24,15 @@ CORS(app)
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("exyplay")
 
+# ── Verbose YT-DLP Logger ────────────────────────────────────────────────────
+class YTDLLogger(object):
+    def debug(self, msg):
+        log.info(f"YT-DLP-DEBUG: {msg}")
+    def warning(self, msg):
+        log.warning(f"YT-DLP-WARN: {msg}")
+    def error(self, msg):
+        log.error(f"YT-DLP-ERROR: {msg}")
+
 # ── Auto-Install & Start PO Token Server ─────────────────────────────────────
 def init_pot_server():
     """Downloads and runs the bgutil-pot token server natively on Render"""
@@ -538,7 +547,6 @@ def get_stream_url(video_id):
     yt_url       = f"https://www.youtube.com/watch?v={video_id}"
     cookies_ok   = os.path.exists(ORIGINAL_COOKIES)
 
-    # COPY COOKIES TO WRITABLE LOCATION
     if cookies_ok:
         try:
             shutil.copy(ORIGINAL_COOKIES, COOKIES_FILE)
@@ -551,8 +559,10 @@ def get_stream_url(video_id):
     def try_ytdlp(client, use_cookies):
         opts = {
             "format":        "bestaudio/best",
-            "quiet":         True,
-            "no_warnings":   True,
+            "quiet":         False, # ENABLED VERBOSE
+            "no_warnings":   False, # ENABLED VERBOSE
+            "verbose":       True,  # ENABLED VERBOSE
+            "logger":        YTDLLogger(), # CUSTOM LOGGER
             "skip_download": True,
             "extractor_args": {
                 "youtube": {"player_client": [client]}
@@ -566,13 +576,12 @@ def get_stream_url(video_id):
             info = ydl.extract_info(yt_url, download=False)
         return info.get("url", ""), info.get("ext", "webm")
 
-    # yt-dlp Attempt order - Prioritizing mweb/ios for PO token compatibility
     attempts = [
-        ("mweb",         True),   # Mobile Web (Best for PO Tokens)
-        ("web",          True),   # Desktop Web
-        ("ios",          True),   # iOS Client
-        ("tv_embedded",  False),  # TV Fallback
-        ("android",      False),  # Android Fallback
+        ("mweb",         True),
+        ("web",          True),
+        ("ios",          True),
+        ("tv_embedded",  False),
+        ("android",      False),
     ]
 
     for client, use_cookies in attempts:
@@ -598,7 +607,6 @@ def get_stream_url(video_id):
 @app.route("/stream/findcookies")
 @handle
 def find_cookies():
-    """GET /stream/findcookies — scan filesystem to locate cookies.txt on Render."""
     search_paths = [
         "/etc/secrets/cookies.txt",
         "/etc/secrets/cookies",
@@ -643,7 +651,6 @@ def stream_debug():
     COOKIES_FILE = "/tmp/cookies.txt"
     cookies_ok = os.path.exists(ORIGINAL_COOKIES)
 
-    # COPY COOKIES TO WRITABLE LOCATION FOR DEBUG ENDPOINT
     if cookies_ok:
         try:
             shutil.copy(ORIGINAL_COOKIES, COOKIES_FILE)
@@ -655,8 +662,12 @@ def stream_debug():
     if cookies_ok:
         try:
             ydl_opts = {
-                "format": "bestaudio/best", "quiet": True,
-                "no_warnings": True, "skip_download": True,
+                "format": "bestaudio/best", 
+                "quiet": False, # ENABLED VERBOSE
+                "no_warnings": False, # ENABLED VERBOSE
+                "verbose": True, # ENABLED VERBOSE
+                "logger": YTDLLogger(), # CUSTOM LOGGER
+                "skip_download": True,
                 "cookiefile": COOKIES_FILE,
                 "extractor_args": {
                     "youtube": {"player_client": ["mweb"]}

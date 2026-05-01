@@ -3,4 +3,4 @@ flask-cors>=4.0.0
 ytmusicapi>=1.11.6
 requests>=2.31.0
 yt-dlp
-bgutil-ytdlp-pot-provider
+bgutil-ytdlp-pot-provider==0.8.1

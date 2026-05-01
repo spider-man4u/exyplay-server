@@ -500,7 +500,7 @@ def delete_upload_entity(entity_id):
 def get_stream_url(video_id):
     """
     GET /stream/<videoId>
-    Tries default yt-dlp behavior, then specific clients, then Piped.
+    Tries default yt-dlp behavior, then Cobalt API fallback.
     """
     ORIGINAL_COOKIES = os.getenv("COOKIES_FILE", "/etc/secrets/cookies.txt")
     COOKIES_FILE = "/tmp/cookies.txt"
@@ -525,7 +525,6 @@ def get_stream_url(video_id):
             "skip_download": True,
         }
         
-        # Only inject the extractor_args if we are explicitly forcing a specific client
         if client != "default":
             opts["extractor_args"] = {
                 "youtube": {"player_client": [client]}
@@ -538,13 +537,11 @@ def get_stream_url(video_id):
             info = ydl.extract_info(yt_url, download=False)
         return info.get("url", ""), info.get("ext", "webm")
 
-    # Attempt order: Start by letting yt-dlp use its own default client rotation with cookies
+    # yt-dlp Attempt order
     attempts = [
-        ("default",      True),  # 1. Let yt-dlp decide the best client automatically
-        ("web",          True),  # 2. Desktop Web
-        ("mweb",         True),  # 3. Mobile Web
-        ("tv_embedded",  False), # 4. TV without cookies
-        ("android",      False), # 5. Android without cookies
+        ("default",      True),
+        ("tv_embedded",  False),
+        ("android",      False),
     ]
 
     for client, use_cookies in attempts:
@@ -559,31 +556,36 @@ def get_stream_url(video_id):
         except Exception as e:
             log.warning(f"❌ {label} failed: {e}")
 
-    # Piped fallback
-    for base in ["https://pipedapi.kavin.rocks",
-                 "https://pipedapi.tokhmi.xyz",
-                 "https://pipedapi.smnz.de",
-                 "https://piped-api.garudalinux.org"]:
-        try:
-            res     = requests.get(f"{base}/streams/{video_id}",
-                                   timeout=6,
-                                   headers={"User-Agent": "Exyplay/1.0"}).json()
-            streams = res.get("audioStreams", [])
-            if not streams:
-                continue
-            chosen, ext = None, "webm"
-            for s in streams:
-                if "mp4" in s.get("mimeType","") or "m4a" in s.get("mimeType",""):
-                    chosen, ext = s.get("url"), "m4a"
-                    break
-            if not chosen:
-                chosen = streams[0].get("url","")
-            if chosen:
-                log.info(f"✅ Piped {base} → {video_id}")
-                return ok({"url": chosen, "ext": ext,
-                           "videoId": video_id, "source": "piped"})
-        except Exception as e:
-            log.warning(f"Piped {base} failed: {e}")
+    # COBALT API FALLBACK (Replaces dead Piped instances)
+    log.info(f"🔄 Trying Cobalt API fallback for {video_id}")
+    try:
+        cobalt_headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "Exyplay/1.0"
+        }
+        cobalt_body = {
+            "url": yt_url,
+            "isAudioOnly": True,
+            "aFormat": "mp3"
+        }
+        
+        res = requests.post(
+            "https://api.cobalt.tools/api/json",
+            json=cobalt_body,
+            headers=cobalt_headers,
+            timeout=8
+        )
+        
+        if res.status_code == 200:
+            data = res.json()
+            if "url" in data:
+                log.info(f"✅ Cobalt → {video_id}")
+                return ok({"url": data["url"], "ext": "mp3", 
+                           "videoId": video_id, "source": "cobalt"})
+        log.warning(f"Cobalt failed: HTTP {res.status_code} - {res.text}")
+    except Exception as e:
+        log.warning(f"Cobalt request failed: {e}")
 
     log.error(f"❌ All strategies exhausted for {video_id}")
     return err(
@@ -649,7 +651,7 @@ def stream_debug():
             log.error(f"Failed to copy cookies to /tmp in debug: {e}")
             cookies_ok = False
 
-    # Test cookies WITH DEFAULT CLIENT (no extractor_args override)
+    # Test cookies WITH DEFAULT CLIENT
     if cookies_ok:
         try:
             ydl_opts = {
@@ -666,39 +668,19 @@ def stream_debug():
     else:
         results["cookies+default"] = f"⚠️  No cookies.txt at '{ORIGINAL_COOKIES}' or failed to copy to /tmp"
 
-    # Test each specific client without cookies
-    for client in ["tv_embedded", "ios", "android", "mweb", "web"]:
-        try:
-            ydl_opts = {
-                "format": "bestaudio/best", "quiet": True,
-                "no_warnings": True, "skip_download": True,
-                "extractor_args": {
-                    "youtube": {
-                        "player_client": [client],
-                        "player_skip": ["webpage", "configs"],
-                    }
-                },
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(
-                    f"https://www.youtube.com/watch?v={test_id}", download=False)
-            results[client] = "✅ WORKS" if info.get("url") else "❌ empty"
-        except Exception as e:
-            msg = str(e)
-            if "Sign in" in msg or "bot" in msg:
-                results[client] = "🔴 BOT BLOCKED"
-            elif "429" in msg:
-                results[client] = "🟡 RATE LIMITED"
-            else:
-                results[client] = f"❌ {msg[:100]}"
-
-    # Test Piped
+    # Test Cobalt
     try:
-        res = requests.get(
-            f"https://pipedapi.kavin.rocks/streams/{test_id}", timeout=5).json()
-        results["piped"] = "✅ WORKS" if res.get("audioStreams") else f"❌ {res.get('error')}"
+        res = requests.post(
+            "https://api.cobalt.tools/api/json",
+            json={"url": f"https://www.youtube.com/watch?v={test_id}", "isAudioOnly": True},
+            headers={"Accept": "application/json", "Content-Type": "application/json"}
+        )
+        if res.status_code == 200 and "url" in res.json():
+            results["cobalt"] = "✅ WORKS"
+        else:
+            results["cobalt"] = f"❌ HTTP {res.status_code}"
     except Exception as e:
-        results["piped"] = f"❌ {str(e)[:80]}"
+        results["cobalt"] = f"❌ {str(e)[:80]}"
 
     working = [k for k, v in results.items() if v.startswith("✅")]
     return ok({
@@ -707,7 +689,7 @@ def stream_debug():
         "cookies_present": cookies_ok,
         "results": results,
         "working_methods": working,
-        "recommendation": working[0] if working else "NONE — add cookies.txt",
+        "recommendation": working[0] if working else "NONE",
     })
 
 # ════════════════════════════════════════════════════════════════════════════

@@ -46,8 +46,9 @@ from ytmusicapi import YTMusic
 def start_po_token_server():
     binary_path = "/tmp/bgutil-pot"
     if not os.path.exists(binary_path):
-        log.info("Downloading bgutil-pot v1.3.1...")
-        url = "https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs/releases/download/v1.3.1/bgutil-pot-linux-x86_64"
+        log.info("Downloading latest bgutil-pot (v0.8.1)...")
+        # Restored to the working 'latest' URL
+        url = "https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs/releases/latest/download/bgutil-pot-linux-x86_64"
         try:
             urllib.request.urlretrieve(url, binary_path)
             os.chmod(binary_path, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)

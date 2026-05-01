@@ -499,114 +499,81 @@ def delete_upload_entity(entity_id):
 def get_stream_url(video_id):
     """
     GET /stream/<videoId>
-
-    Extraction order:
-      1. yt-dlp with cookies.txt  — most reliable on datacenter IPs
-      2. yt-dlp tv_embedded       — works for some videos without cookies
-      3. Piped public API         — last resort proxy
+    Tries cookies+android, cookies+tv_embedded, bare android,
+    bare tv_embedded, then Piped — in that order.
     """
-
-    # Render mounts secret files at /etc/secrets/<filename>
     COOKIES_FILE = os.getenv("COOKIES_FILE", "/etc/secrets/cookies.txt")
+    yt_url       = f"https://www.youtube.com/watch?v={video_id}"
+    cookies_ok   = os.path.exists(COOKIES_FILE)
 
-    yt_url = f"https://www.youtube.com/watch?v={video_id}"
+    log.info(f"▶ /stream/{video_id}  cookies_file={COOKIES_FILE}  exists={cookies_ok}")
 
-    # ── 1. yt-dlp with cookies (most reliable) ───────────────────────────────
-    if os.path.exists(COOKIES_FILE):
+    def try_ytdlp(client, use_cookies):
+        opts = {
+            "format":        "bestaudio/best",
+            "quiet":         True,
+            "no_warnings":   True,
+            "skip_download": True,
+            "extractor_args": {
+                "youtube": {"player_client": [client]}
+            },
+        }
+        if use_cookies and cookies_ok:
+            opts["cookiefile"] = COOKIES_FILE
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(yt_url, download=False)
+        return info.get("url", ""), info.get("ext", "webm")
+
+    # Attempt order
+    attempts = [
+        ("android",    True),
+        ("tv_embedded", True),
+        ("android",    False),
+        ("tv_embedded", False),
+    ]
+
+    for client, use_cookies in attempts:
+        label = f"{'cookies+' if use_cookies else ''}{client}"
         try:
-            ydl_opts = {
-                "format": "bestaudio/best",
-                "quiet": True,
-                "no_warnings": True,
-                "skip_download": True,
-                "cookiefile": COOKIES_FILE,
-                "extractor_args": {
-                    "youtube": {
-                        # android + tv_embedded both confirmed working on this server
-                        "player_client": ["android", "tv_embedded"],
-                    }
-                },
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(yt_url, download=False)
-
-            stream_url = info.get("url", "")
-            ext        = info.get("ext", "webm")
-
-            if stream_url:
-                log.info(f"✅ cookies resolved {video_id} [{ext}]")
-                return ok({"url": stream_url, "ext": ext,
-                           "videoId": video_id, "source": "cookies"})
+            url, ext = try_ytdlp(client, use_cookies)
+            if url:
+                log.info(f"✅ {label} → {video_id} [{ext}]")
+                return ok({"url": url, "ext": ext,
+                           "videoId": video_id, "source": label})
+            log.warning(f"⚠️  {label} returned empty URL")
         except Exception as e:
-            log.warning(f"cookies failed for {video_id}: {e}")
-    else:
-        log.warning(f"⚠️  No cookies.txt found — skipping cookie auth")
+            log.warning(f"❌ {label} failed: {e}")
 
-    # ── 2. yt-dlp without cookies — android + tv_embedded (both work on this IP) ──
-    for client in ["android", "tv_embedded"]:
+    # Piped fallback
+    for base in ["https://pipedapi.kavin.rocks",
+                 "https://pipedapi.tokhmi.xyz",
+                 "https://pipedapi.smnz.de",
+                 "https://piped-api.garudalinux.org"]:
         try:
-            ydl_opts = {
-                "format": "bestaudio/best",
-                "quiet": True,
-                "no_warnings": True,
-                "skip_download": True,
-                "extractor_args": {
-                    "youtube": {
-                        "player_client": [client],
-                        "player_skip": ["webpage", "configs"],
-                    }
-                },
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(yt_url, download=False)
-
-            stream_url = info.get("url", "")
-            ext        = info.get("ext", "webm")
-
-            if stream_url:
-                log.info(f"✅ {client} resolved {video_id} [{ext}]")
-                return ok({"url": stream_url, "ext": ext,
-                           "videoId": video_id, "source": client})
-        except Exception as e:
-            log.warning(f"{client} failed for {video_id}: {e}")
-
-    # ── 3. Piped proxy fallback ───────────────────────────────────────────────
-    for base_url in [
-        "https://pipedapi.kavin.rocks",
-        "https://pipedapi.tokhmi.xyz",
-        "https://pipedapi.smnz.de",
-        "https://piped-api.garudalinux.org",
-    ]:
-        try:
-            res = requests.get(
-                f"{base_url}/streams/{video_id}",
-                timeout=6,
-                headers={"User-Agent": "Exyplay/1.0"}
-            ).json()
-
+            res     = requests.get(f"{base}/streams/{video_id}",
+                                   timeout=6,
+                                   headers={"User-Agent": "Exyplay/1.0"}).json()
             streams = res.get("audioStreams", [])
             if not streams:
                 continue
-
             chosen, ext = None, "webm"
             for s in streams:
-                if "mp4" in s.get("mimeType", "") or "m4a" in s.get("mimeType", ""):
+                if "mp4" in s.get("mimeType","") or "m4a" in s.get("mimeType",""):
                     chosen, ext = s.get("url"), "m4a"
                     break
             if not chosen:
-                chosen = streams[0].get("url", "")
-
+                chosen = streams[0].get("url","")
             if chosen:
-                log.info(f"✅ Piped resolved {video_id} via {base_url}")
+                log.info(f"✅ Piped {base} → {video_id}")
                 return ok({"url": chosen, "ext": ext,
                            "videoId": video_id, "source": "piped"})
         except Exception as e:
-            log.warning(f"Piped {base_url} failed: {e}")
+            log.warning(f"Piped {base} failed: {e}")
 
-    log.error(f"❌ All strategies failed for {video_id}")
+    log.error(f"❌ All strategies exhausted for {video_id}")
     return err(
-        "Stream unavailable. Add cookies.txt to your server — "
-        "see https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp",
+        f"Could not resolve stream for {video_id}. "
+        "Check Render logs for details — run /stream/debug to diagnose.",
         503
     )
 

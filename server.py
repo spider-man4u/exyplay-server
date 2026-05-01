@@ -500,8 +500,7 @@ def delete_upload_entity(entity_id):
 def get_stream_url(video_id):
     """
     GET /stream/<videoId>
-    Tries cookies+android, cookies+tv_embedded, bare android,
-    bare tv_embedded, then Piped — in that order.
+    Tries web/mweb with cookies, then tv_embedded/android, then Piped — in that order.
     """
     ORIGINAL_COOKIES = os.getenv("COOKIES_FILE", "/etc/secrets/cookies.txt")
     COOKIES_FILE = "/tmp/cookies.txt"
@@ -534,12 +533,14 @@ def get_stream_url(video_id):
             info = ydl.extract_info(yt_url, download=False)
         return info.get("url", ""), info.get("ext", "webm")
 
-    # Attempt order
+    # Attempt order matching Web cookies with Web clients first
     attempts = [
-        ("android",    True),
-        ("tv_embedded", True),
-        ("android",    False),
-        ("tv_embedded", False),
+        ("web",          True),
+        ("mweb",         True),
+        ("android",      True),
+        ("tv_embedded",  True),
+        ("tv_embedded",  False),
+        ("android",      False),
     ]
 
     for client, use_cookies in attempts:

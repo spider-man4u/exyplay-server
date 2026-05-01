@@ -6,13 +6,10 @@ Run: python server.py
 
 import os
 import sys
-import stat
-import time
-import json
 import shutil
 import logging
 import subprocess
-import urllib.request
+import time
 import requests
 from functools import wraps
 
@@ -23,40 +20,46 @@ log = logging.getLogger("exyplay")
 # 1. SETUP SYSTEM DEPENDENCIES (MUST HAPPEN BEFORE IMPORTING YT-DLP)
 # ════════════════════════════════════════════════════════════════════════════
 
-# A. Install Node.js for YouTube JavaScript Signature Decryption
-node_dir = "/tmp/nodejs"
-node_bin = os.path.join(node_dir, "bin", "node")
+def setup_environment():
+    """Sets up Node.js and builds the official PO Token Provider"""
+    node_dir = "/tmp/nodejs"
+    node_bin = os.path.join(node_dir, "bin", "node")
+    npm_bin = os.path.join(node_dir, "bin", "npm")
+    
+    # 1. Install Node.js (Required for YouTube JS signatures & Token Server)
+    if not os.path.exists(node_bin):
+        log.info("Downloading Node.js...")
+        subprocess.run("curl -sL https://nodejs.org/dist/v20.11.1/node-v20.11.1-linux-x64.tar.xz | tar xJ -C /tmp", shell=True)
+        if os.path.exists("/tmp/node-v20.11.1-linux-x64"):
+            shutil.move("/tmp/node-v20.11.1-linux-x64", node_dir)
+            
+    # Update PATH immediately before any other imports
+    os.environ["PATH"] = f"{os.path.join(node_dir, 'bin')}:{os.environ.get('PATH', '')}"
 
-if not os.path.exists(node_bin):
-    log.info("Downloading Node.js (required for JS challenges)...")
-    subprocess.run("curl -sL https://nodejs.org/dist/v20.11.1/node-v20.11.1-linux-x64.tar.xz | tar xJ -C /tmp", shell=True)
-    if os.path.exists("/tmp/node-v20.11.1-linux-x64"):
-        shutil.move("/tmp/node-v20.11.1-linux-x64", node_dir)
+    try:
+        subprocess.run([node_bin, "-v"], check=True, stdout=subprocess.DEVNULL)
+        log.info("✅ Node.js is ready in system PATH.")
+    except Exception as e:
+        log.error(f"❌ Node.js failed: {e}")
 
-# Force Node into PATH so yt-dlp finds it automatically
-os.environ["PATH"] = f"{os.path.join(node_dir, 'bin')}:{os.environ.get('PATH', '')}"
+    # 2. Clone and build the official Brainicism PO Token server
+    bgutil_repo = "/tmp/bgutil-repo"
+    server_dir = os.path.join(bgutil_repo, "server")
+    main_js = os.path.join(server_dir, "build", "main.js")
+    
+    if not os.path.exists(main_js):
+        log.info("Cloning official bgutil repository...")
+        if os.path.exists(bgutil_repo):
+            shutil.rmtree(bgutil_repo)
+        subprocess.run(["git", "clone", "--depth", "1", "https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git", bgutil_repo], check=True)
+        
+        log.info("Installing NPM dependencies...")
+        subprocess.run([npm_bin, "install"], cwd=server_dir, check=True)
+        
+        log.info("Building TypeScript to JavaScript...")
+        subprocess.run([npm_bin, "run", "build"], cwd=server_dir, check=True)
 
-# B. Import yt-dlp NOW so it registers the updated PATH
-import yt_dlp
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-from ytmusicapi import YTMusic
-
-# C. Download and start PO Token background generator
-def start_po_token_server():
-    binary_path = "/tmp/bgutil-pot"
-    if not os.path.exists(binary_path):
-        log.info("Downloading latest bgutil-pot (v0.8.1)...")
-        # Restored to the working 'latest' URL
-        url = "https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs/releases/latest/download/bgutil-pot-linux-x86_64"
-        try:
-            urllib.request.urlretrieve(url, binary_path)
-            os.chmod(binary_path, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
-        except Exception as e:
-            log.error(f"Failed to download bgutil-pot: {e}")
-            return
-
-    # Check if already running
+    # 3. Start the background HTTP server
     try:
         requests.get("http://127.0.0.1:4416/ping", timeout=1)
         log.info("✅ bgutil-pot server is already running.")
@@ -64,24 +67,29 @@ def start_po_token_server():
     except:
         pass
 
-    log.info("Starting bgutil-pot on port 4416...")
+    log.info("Starting official bgutil HTTP server on port 4416...")
     subprocess.Popen(
-        [binary_path, "server", "--port", "4416"],
+        [node_bin, main_js, "server", "--port", "4416"],
         stdout=sys.stdout, stderr=sys.stderr
     )
     
-    # Block and wait until the server is fully awake (Max 15 seconds)
     for i in range(15):
         try:
             requests.get("http://127.0.0.1:4416/ping", timeout=1)
-            log.info("✅ bgutil-pot server is ready and responding!")
+            log.info("✅ bgutil PO Token server is ready and responding!")
             return
         except:
             time.sleep(1)
             
-    log.error("❌ bgutil-pot server failed to start or respond in time.")
+    log.error("❌ bgutil PO Token server failed to start.")
 
-start_po_token_server()
+# EXECUTE SETUP BEFORE IMPORTING YT-DLP
+setup_environment()
+
+import yt_dlp
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from ytmusicapi import YTMusic
 
 # ════════════════════════════════════════════════════════════════════════════
 # 2. APP INITIALIZATION
@@ -400,8 +408,7 @@ def get_stream_url(video_id):
             "no_warnings":   True, 
             "skip_download": True,
             "extractor_args": {
-                "youtube": {"player_client": [client]},
-                "pot": {"bgutil": ["base_url=http://127.0.0.1:4416"]} # Explicitly tell plugin where to look
+                "youtube": {"player_client": [client]}
             }
         }
         
@@ -427,7 +434,7 @@ def get_stream_url(video_id):
             if url:
                 log.info(f"✅ {label} → {video_id} [{ext}]")
                 return ok({"url": url, "ext": ext, "videoId": video_id, "source": label})
-        except Exception as e:
+        except Exception:
             pass
 
     return err("Could not resolve stream. Check Render logs — run /stream/debug to diagnose.", 503)
@@ -454,8 +461,7 @@ def stream_debug():
                 "quiet": False, "no_warnings": False, "verbose": True, "logger": YTDLLogger(),
                 "skip_download": True, "cookiefile": COOKIES_FILE,
                 "extractor_args": {
-                    "youtube": {"player_client": ["mweb"]},
-                    "pot": {"bgutil": ["base_url=http://127.0.0.1:4416"]} # Explicitly tell plugin where to look
+                    "youtube": {"player_client": ["mweb"]}
                 }
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:

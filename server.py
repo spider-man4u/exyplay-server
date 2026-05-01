@@ -499,106 +499,54 @@ def delete_upload_entity(entity_id):
 def get_stream_url(video_id):
     """
     GET /stream/<videoId>
-    Uses tv_embedded client — the only client that works on Render's datacenter IP.
-    Falls back to Piped instances if yt-dlp fails.
+
+    Extraction order:
+      1. yt-dlp with cookies.txt  — most reliable on datacenter IPs
+      2. yt-dlp tv_embedded       — works for some videos without cookies
+      3. Piped public API         — last resort proxy
     """
 
-    # ── Strategy 1: yt-dlp with tv_embedded (confirmed working) ─────────────
-    try:
-        ydl_opts = {
-            # tv_embedded serves audio-only in webm/opus or mp4 container.
-            # Do NOT filter by ext=m4a — tv_embedded doesn't have it.
-            # "bestaudio" picks the best available audio stream.
-            "format": "bestaudio/best",
-            "quiet": True,
-            "no_warnings": True,
-            "skip_download": True,
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["tv_embedded"],
-                    "player_skip": ["webpage", "configs"],
-                }
-            },
-        }
+    # Render mounts secret files at /etc/secrets/<filename>
+    COOKIES_FILE = os.getenv("COOKIES_FILE", "/etc/secrets/cookies.txt")
+    # Fallback to local path for dev
+    if not os.path.exists(COOKIES_FILE):
+        COOKIES_FILE = "cookies.txt"
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(
-                f"https://www.youtube.com/watch?v={video_id}",
-                download=False
-            )
+    yt_url = f"https://www.youtube.com/watch?v={video_id}"
 
-        stream_url = info.get("url", "")
-        ext        = info.get("ext", "webm")
-
-        if stream_url:
-            log.info(f"✅ tv_embedded resolved {video_id} [{ext}]")
-            return ok({
-                "url":     stream_url,
-                "ext":     ext,
-                "videoId": video_id,
-                "source":  "tv_embedded",
-            })
-
-    except Exception as e:
-        log.warning(f"tv_embedded failed for {video_id}: {e}")
-
-    # ── Strategy 2: Piped instances ──────────────────────────────────────────
-    piped_instances = [
-        "https://pipedapi.kavin.rocks",
-        "https://pipedapi.tokhmi.xyz",
-        "https://pipedapi.smnz.de",
-        "https://piped-api.garudalinux.org",
-    ]
-    for base_url in piped_instances:
+    # ── 1. yt-dlp with cookies (most reliable) ───────────────────────────────
+    if os.path.exists(COOKIES_FILE):
         try:
-            res = requests.get(
-                f"{base_url}/streams/{video_id}",
-                timeout=5,
-                headers={"User-Agent": "Exyplay/1.0"}
-            ).json()
+            ydl_opts = {
+                "format": "bestaudio/best",
+                "quiet": True,
+                "no_warnings": True,
+                "skip_download": True,
+                "cookiefile": COOKIES_FILE,
+                "extractor_args": {
+                    "youtube": {
+                        # android + tv_embedded both confirmed working on this server
+                        "player_client": ["android", "tv_embedded"],
+                    }
+                },
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(yt_url, download=False)
 
-            audio_streams = res.get("audioStreams", [])
-            if not audio_streams:
-                continue
+            stream_url = info.get("url", "")
+            ext        = info.get("ext", "webm")
 
-            # Prefer any m4a/mp4 stream, otherwise take first available
-            chosen_url = None
-            chosen_ext = "webm"
-            for stream in audio_streams:
-                if "mp4" in stream.get("mimeType", "") or "m4a" in stream.get("mimeType", ""):
-                    chosen_url = stream.get("url")
-                    chosen_ext = "m4a"
-                    break
-            if not chosen_url:
-                chosen_url = audio_streams[0].get("url", "")
-
-            if chosen_url:
-                log.info(f"✅ Piped resolved {video_id} via {base_url}")
-                return ok({
-                    "url":     chosen_url,
-                    "ext":     chosen_ext,
-                    "videoId": video_id,
-                    "source":  "piped",
-                })
-
+            if stream_url:
+                log.info(f"✅ cookies resolved {video_id} [{ext}]")
+                return ok({"url": stream_url, "ext": ext,
+                           "videoId": video_id, "source": "cookies"})
         except Exception as e:
-            log.warning(f"Piped {base_url} failed: {e}")
-            continue
+            log.warning(f"cookies failed for {video_id}: {e}")
+    else:
+        log.warning(f"⚠️  No cookies.txt found — skipping cookie auth")
 
-    log.error(f"❌ All strategies failed for {video_id}")
-    return err(f"Could not resolve stream for {video_id}", 503)
-
-
-@app.route("/stream/debug")
-@handle
-def stream_debug():
-    """
-    GET /stream/debug — tests which clients work on this server's IP.
-    """
-    test_id = "dQw4w9WgXcQ"
-    results = {}
-
-    for client in ["tv_embedded", "mweb", "ios", "android", "web"]:
+    # ── 2. yt-dlp without cookies — android + tv_embedded (both work on this IP) ──
+    for client in ["android", "tv_embedded"]:
         try:
             ydl_opts = {
                 "format": "bestaudio/best",
@@ -613,10 +561,104 @@ def stream_debug():
                 },
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(yt_url, download=False)
+
+            stream_url = info.get("url", "")
+            ext        = info.get("ext", "webm")
+
+            if stream_url:
+                log.info(f"✅ {client} resolved {video_id} [{ext}]")
+                return ok({"url": stream_url, "ext": ext,
+                           "videoId": video_id, "source": client})
+        except Exception as e:
+            log.warning(f"{client} failed for {video_id}: {e}")
+
+    # ── 3. Piped proxy fallback ───────────────────────────────────────────────
+    for base_url in [
+        "https://pipedapi.kavin.rocks",
+        "https://pipedapi.tokhmi.xyz",
+        "https://pipedapi.smnz.de",
+        "https://piped-api.garudalinux.org",
+    ]:
+        try:
+            res = requests.get(
+                f"{base_url}/streams/{video_id}",
+                timeout=6,
+                headers={"User-Agent": "Exyplay/1.0"}
+            ).json()
+
+            streams = res.get("audioStreams", [])
+            if not streams:
+                continue
+
+            chosen, ext = None, "webm"
+            for s in streams:
+                if "mp4" in s.get("mimeType", "") or "m4a" in s.get("mimeType", ""):
+                    chosen, ext = s.get("url"), "m4a"
+                    break
+            if not chosen:
+                chosen = streams[0].get("url", "")
+
+            if chosen:
+                log.info(f"✅ Piped resolved {video_id} via {base_url}")
+                return ok({"url": chosen, "ext": ext,
+                           "videoId": video_id, "source": "piped"})
+        except Exception as e:
+            log.warning(f"Piped {base_url} failed: {e}")
+
+    log.error(f"❌ All strategies failed for {video_id}")
+    return err(
+        "Stream unavailable. Add cookies.txt to your server — "
+        "see https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp",
+        503
+    )
+
+
+@app.route("/stream/debug")
+@handle
+def stream_debug():
+    """GET /stream/debug — diagnose which extraction methods work on this IP."""
+    test_id = "dQw4w9WgXcQ"
+    results = {}
+    COOKIES_FILE = os.getenv("COOKIES_FILE", "/etc/secrets/cookies.txt")
+    if not os.path.exists(COOKIES_FILE):
+        COOKIES_FILE = "cookies.txt"
+
+    # Test cookies
+    if os.path.exists(COOKIES_FILE):
+        try:
+            ydl_opts = {
+                "format": "bestaudio/best", "quiet": True,
+                "no_warnings": True, "skip_download": True,
+                "cookiefile": COOKIES_FILE,
+                "extractor_args": {"youtube": {"player_client": ["web"]}},
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(
-                    f"https://www.youtube.com/watch?v={test_id}", download=False
-                )
-            results[client] = "✅ WORKS" if info.get("url") else "❌ empty URL"
+                    f"https://www.youtube.com/watch?v={test_id}", download=False)
+            results["cookies+web"] = "✅ WORKS" if info.get("url") else "❌ empty"
+        except Exception as e:
+            results["cookies+web"] = f"❌ {str(e)[:100]}"
+    else:
+        results["cookies+web"] = f"⚠️  No cookies.txt at '{COOKIES_FILE}'"
+
+    # Test each client without cookies
+    for client in ["tv_embedded", "ios", "android", "mweb", "web"]:
+        try:
+            ydl_opts = {
+                "format": "bestaudio/best", "quiet": True,
+                "no_warnings": True, "skip_download": True,
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": [client],
+                        "player_skip": ["webpage", "configs"],
+                    }
+                },
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(
+                    f"https://www.youtube.com/watch?v={test_id}", download=False)
+            results[client] = "✅ WORKS" if info.get("url") else "❌ empty"
         except Exception as e:
             msg = str(e)
             if "Sign in" in msg or "bot" in msg:
@@ -626,18 +668,22 @@ def stream_debug():
             else:
                 results[client] = f"❌ {msg[:100]}"
 
+    # Test Piped
     try:
         res = requests.get(
-            f"https://pipedapi.kavin.rocks/streams/{test_id}", timeout=5
-        ).json()
-        results["piped"] = "✅ WORKS" if res.get("audioStreams") else f"❌ {res.get('error','no streams')}"
+            f"https://pipedapi.kavin.rocks/streams/{test_id}", timeout=5).json()
+        results["piped"] = "✅ WORKS" if res.get("audioStreams") else f"❌ {res.get('error')}"
     except Exception as e:
         results["piped"] = f"❌ {str(e)[:80]}"
 
+    working = [k for k, v in results.items() if v.startswith("✅")]
     return ok({
         "test_video": test_id,
+        "cookies_file": COOKIES_FILE,
+        "cookies_present": os.path.exists(COOKIES_FILE),
         "results": results,
-        "recommendation": next((k for k, v in results.items() if v.startswith("✅")), "NONE"),
+        "working_methods": working,
+        "recommendation": working[0] if working else "NONE — add cookies.txt",
     })
 
 # ════════════════════════════════════════════════════════════════════════════

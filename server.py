@@ -10,6 +10,7 @@ import os
 import shutil
 import json
 import logging
+import subprocess
 from functools import wraps
 import requests
 import yt_dlp
@@ -22,6 +23,36 @@ CORS(app)
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("exyplay")
+
+# ── Auto-Install & Start PO Token Server ─────────────────────────────────────
+def init_pot_server():
+    """Downloads and runs the bgutil-pot token server natively on Render"""
+    binary_path = "/tmp/bgutil-pot"
+    if not os.path.exists(binary_path):
+        log.info("Downloading bgutil-pot token generator...")
+        url = "https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs/releases/latest/download/bgutil-pot-linux-x86_64"
+        try:
+            import urllib.request
+            import stat
+            urllib.request.urlretrieve(url, binary_path)
+            st = os.stat(binary_path)
+            os.chmod(binary_path, st.st_mode | stat.S_IEXEC)
+            log.info("Successfully downloaded and configured bgutil-pot.")
+        except Exception as e:
+            log.error(f"Failed to download bgutil-pot: {e}")
+            return
+
+    try:
+        # Check if already running
+        requests.get("http://127.0.0.1:4416", timeout=1)
+        log.info("bgutil-pot server is already running.")
+    except:
+        log.info("Starting bgutil-pot background server on port 4416...")
+        subprocess.Popen([binary_path, "server", "--port", "4416"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        import time
+        time.sleep(2) # Give server time to bind
+
+init_pot_server()
 
 # ── Auth setup ───────────────────────────────────────────────────────────────
 AUTH_FILE = os.getenv("YTMUSIC_AUTH_FILE", "browser.json")
@@ -556,7 +587,7 @@ def get_stream_url(video_id):
         except Exception as e:
             log.warning(f"❌ {label} failed: {e}")
 
-    # COBALT API FALLBACK (Replaces dead Piped instances)
+    # COBALT API FALLBACK
     log.info(f"🔄 Trying Cobalt API fallback for {video_id}")
     try:
         cobalt_headers = {

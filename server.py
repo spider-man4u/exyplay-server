@@ -38,8 +38,9 @@ def init_pot_server():
     """Downloads and runs the bgutil-pot token server natively on Render"""
     binary_path = "/tmp/bgutil-pot"
     if not os.path.exists(binary_path):
-        log.info("Downloading bgutil-pot token generator...")
-        url = "https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs/releases/latest/download/bgutil-pot-linux-x86_64"
+        log.info("Downloading bgutil-pot token generator (v0.8.1)...")
+        # Pinned to v0.8.1 to match the pip package
+        url = "https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs/releases/download/v0.8.1/bgutil-pot-linux-x86_64"
         try:
             import urllib.request
             import stat
@@ -559,10 +560,10 @@ def get_stream_url(video_id):
     def try_ytdlp(client, use_cookies):
         opts = {
             "format":        "bestaudio/best",
-            "quiet":         False, # ENABLED VERBOSE
-            "no_warnings":   False, # ENABLED VERBOSE
-            "verbose":       True,  # ENABLED VERBOSE
-            "logger":        YTDLLogger(), # CUSTOM LOGGER
+            "quiet":         False,
+            "no_warnings":   False,
+            "verbose":       True,
+            "logger":        YTDLLogger(),
             "skip_download": True,
             "extractor_args": {
                 "youtube": {"player_client": [client]}
@@ -663,10 +664,10 @@ def stream_debug():
         try:
             ydl_opts = {
                 "format": "bestaudio/best", 
-                "quiet": False, # ENABLED VERBOSE
-                "no_warnings": False, # ENABLED VERBOSE
-                "verbose": True, # ENABLED VERBOSE
-                "logger": YTDLLogger(), # CUSTOM LOGGER
+                "quiet": False, 
+                "no_warnings": False, 
+                "verbose": True, 
+                "logger": YTDLLogger(),
                 "skip_download": True,
                 "cookiefile": COOKIES_FILE,
                 "extractor_args": {

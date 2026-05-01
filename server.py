@@ -665,4 +665,4 @@ if __name__ == "__main__":
     debug = os.getenv("DEBUG", "false").lower() == "true"
     log.info(f"🎵 Exyplay Music Server starting on port {port}")
     log.info(f"   Auth: {'✅ ' + AUTH_FILE if os.path.exists(AUTH_FILE) else '⚠️  No auth — public endpoints only'}")
-    app.run(host="0.0.0.0", po
+    app.run(host="0.0.0.0", port=port, debug=debug)

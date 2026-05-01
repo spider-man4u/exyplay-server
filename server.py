@@ -499,16 +499,22 @@ def delete_upload_entity(entity_id):
 def get_stream_url(video_id):
     """
     GET /stream/<videoId>
-    Rotates through multiple public Piped instances, falls back to yt-dlp.
-    Returns: { "status": "ok", "data": { "url": "...", "ext": "m4a" } }
+    Multi-strategy audio URL extractor.
+
+    Strategy order:
+      1. Piped public API   — fastest, no auth
+      2. yt-dlp tv_embedded — bypasses bot check on most datacenter IPs
+      3. yt-dlp mweb client — secondary bypass
+      4. yt-dlp ios client  — tertiary bypass
     """
+
+    # ── Strategy 1: Piped instances ─────────────────────────────────────────
     piped_instances = [
         "https://pipedapi.kavin.rocks",
         "https://pipedapi.tokhmi.xyz",
         "https://pipedapi.smnz.de",
         "https://piped-api.garudalinux.org",
     ]
-
     for base_url in piped_instances:
         try:
             res = requests.get(
@@ -517,65 +523,173 @@ def get_stream_url(video_id):
                 headers={"User-Agent": "Exyplay/1.0"}
             ).json()
 
-            if "error" in res or "audioStreams" not in res:
+            if "error" in res or not res.get("audioStreams"):
                 continue
 
-            audio_streams = res.get("audioStreams", [])
-            if not audio_streams:
-                continue
+            audio_streams = res["audioStreams"]
+            chosen_url, chosen_ext = None, "m4a"
 
-            chosen_url = None
-            chosen_ext = "m4a"
-
-            # Prefer m4a / mp4 audio
             for stream in audio_streams:
-                mime = stream.get("mimeType", "")
-                if "mp4" in mime or "m4a" in mime:
+                if "mp4" in stream.get("mimeType", "") or "m4a" in stream.get("mimeType", ""):
                     chosen_url = stream.get("url")
                     chosen_ext = "m4a"
                     break
 
-            # Fall back to first available stream
             if not chosen_url:
                 chosen_url = audio_streams[0].get("url", "")
                 chosen_ext = "webm"
 
             if chosen_url:
                 log.info(f"✅ Piped resolved {video_id} via {base_url}")
-                return ok({"url": chosen_url, "ext": chosen_ext, "videoId": video_id})
+                return ok({"url": chosen_url, "ext": chosen_ext, "videoId": video_id, "source": "piped"})
 
         except Exception as e:
-            log.warning(f"Piped instance {base_url} failed: {e}")
+            log.warning(f"Piped {base_url} failed: {e}")
             continue
 
-    # ── yt-dlp fallback ──────────────────────────────────────────────────────
-    log.info(f"⚠️  Falling back to yt-dlp for {video_id}")
-    ydl_opts = {
-        "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android"],
-                "skip": ["hls", "dash"],
-            }
+    # ── Strategies 2-4: yt-dlp with different clients ────────────────────────
+    # tv_embedded and mweb clients bypass YouTube's bot-detection on datacenter IPs
+    # because YouTube does not enforce bot challenges on embedded/TV player requests.
+    yt_url = f"https://www.youtube.com/watch?v={video_id}"
+
+    client_attempts = [
+        {
+            "name": "tv_embedded",
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["tv_embedded"],
+                    "player_skip": ["webpage", "configs"],
+                }
+            },
         },
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(
-            f"https://www.youtube.com/watch?v={video_id}",
-            download=False
+        {
+            "name": "mweb",
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["mweb"],
+                    "player_skip": ["webpage", "configs"],
+                }
+            },
+        },
+        {
+            "name": "ios",
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["ios"],
+                    "player_skip": ["webpage", "configs"],
+                }
+            },
+        },
+    ]
+
+    for attempt in client_attempts:
+        try:
+            ydl_opts = {
+                "format": (
+                    "bestaudio[ext=m4a][abr<=160]/"
+                    "bestaudio[ext=m4a]/"
+                    "bestaudio[ext=webm]/"
+                    "bestaudio"
+                ),
+                "quiet": True,
+                "no_warnings": True,
+                "skip_download": True,
+                "extractor_args": attempt["extractor_args"],
+                # Do NOT pass cookies — we rely on client bypass instead
+            }
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(yt_url, download=False)
+
+            stream_url = info.get("url", "")
+            ext        = info.get("ext", "m4a")
+
+            if stream_url:
+                log.info(f"✅ yt-dlp [{attempt['name']}] resolved {video_id}")
+                return ok({
+                    "url":     stream_url,
+                    "ext":     ext,
+                    "videoId": video_id,
+                    "source":  f"yt-dlp-{attempt['name']}",
+                })
+
+        except Exception as e:
+            log.warning(f"yt-dlp [{attempt['name']}] failed for {video_id}: {e}")
+            continue
+
+    # All strategies failed
+    log.error(f"❌ All stream strategies failed for {video_id}")
+    return err(
+        f"Unable to resolve stream for {video_id}. "
+        "YouTube bot-detection is blocking all extraction methods. "
+        "See /stream/debug for diagnostics.",
+        503
+    )
+
+
+@app.route("/stream/debug")
+@handle
+def stream_debug():
+    """
+    GET /stream/debug
+    Tests a known video with each client strategy and reports which ones work.
+    Use this to diagnose YouTube bot-detection issues on your server IP.
+    """
+    test_id = "dQw4w9WgXcQ"  # Rick Astley - Never Gonna Give You Up (always public)
+    results = {}
+
+    clients = ["tv_embedded", "mweb", "ios", "android", "web"]
+    for client in clients:
+        try:
+            ydl_opts = {
+                "format": "bestaudio",
+                "quiet": True,
+                "no_warnings": True,
+                "skip_download": True,
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": [client],
+                        "player_skip": ["webpage", "configs"],
+                    }
+                },
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(
+                    f"https://www.youtube.com/watch?v={test_id}",
+                    download=False
+                )
+            url = info.get("url", "")
+            results[client] = "✅ WORKS" if url else "❌ empty URL"
+        except Exception as e:
+            err_msg = str(e)
+            if "Sign in" in err_msg or "bot" in err_msg:
+                results[client] = "🔴 BOT BLOCKED"
+            elif "429" in err_msg:
+                results[client] = "🟡 RATE LIMITED"
+            else:
+                results[client] = f"❌ {err_msg[:80]}"
+
+    # Also test Piped
+    try:
+        res = requests.get(
+            f"https://pipedapi.kavin.rocks/streams/{test_id}",
+            timeout=5
+        ).json()
+        if "audioStreams" in res and res["audioStreams"]:
+            results["piped"] = "✅ WORKS"
+        else:
+            results["piped"] = f"❌ {res.get('error', 'no audioStreams')}"
+    except Exception as e:
+        results["piped"] = f"❌ {str(e)[:80]}"
+
+    return ok({
+        "test_video": test_id,
+        "results": results,
+        "recommendation": next(
+            (k for k, v in results.items() if v.startswith("✅")),
+            "NONE — need cookies"
         )
-
-    stream_url = info.get("url", "")
-    ext        = info.get("ext", "m4a")
-
-    if not stream_url:
-        return err(f"Could not resolve stream for {video_id}", 500)
-
-    log.info(f"✅ yt-dlp resolved {video_id} [{ext}]")
-    return ok({"url": stream_url, "ext": ext, "videoId": video_id})
+    })
 
 # ════════════════════════════════════════════════════════════════════════════
 # STATUS

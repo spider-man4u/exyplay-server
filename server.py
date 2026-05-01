@@ -531,7 +531,7 @@ def delete_upload_entity(entity_id):
 def get_stream_url(video_id):
     """
     GET /stream/<videoId>
-    Tries default yt-dlp behavior, then Cobalt API fallback.
+    Tries mweb with PO Token plugin natively.
     """
     ORIGINAL_COOKIES = os.getenv("COOKIES_FILE", "/etc/secrets/cookies.txt")
     COOKIES_FILE = "/tmp/cookies.txt"
@@ -554,13 +554,11 @@ def get_stream_url(video_id):
             "quiet":         True,
             "no_warnings":   True,
             "skip_download": True,
-        }
-        
-        if client != "default":
-            opts["extractor_args"] = {
+            "extractor_args": {
                 "youtube": {"player_client": [client]}
             }
-            
+        }
+        
         if use_cookies and cookies_ok:
             opts["cookiefile"] = COOKIES_FILE
             
@@ -568,11 +566,12 @@ def get_stream_url(video_id):
             info = ydl.extract_info(yt_url, download=False)
         return info.get("url", ""), info.get("ext", "webm")
 
-    # yt-dlp Attempt order
+    # yt-dlp Attempt order - Prioritizing mweb for PO token compatibility
     attempts = [
-        ("default",      True),
-        ("tv_embedded",  False),
-        ("android",      False),
+        ("mweb",         True),   # Mobile Web (Best for PO Tokens)
+        ("web",          True),   # Desktop Web
+        ("tv_embedded",  False),  # TV Fallback
+        ("android",      False),  # Android Fallback
     ]
 
     for client, use_cookies in attempts:
@@ -587,7 +586,7 @@ def get_stream_url(video_id):
         except Exception as e:
             log.warning(f"❌ {label} failed: {e}")
 
-    # COBALT API FALLBACK
+    # COBALT API FALLBACK (Updated to v10 API)
     log.info(f"🔄 Trying Cobalt API fallback for {video_id}")
     try:
         cobalt_headers = {
@@ -597,12 +596,12 @@ def get_stream_url(video_id):
         }
         cobalt_body = {
             "url": yt_url,
-            "isAudioOnly": True,
-            "aFormat": "mp3"
+            "downloadMode": "audio",
+            "audioFormat": "mp3"
         }
         
         res = requests.post(
-            "https://api.cobalt.tools/api/json",
+            "https://api.cobalt.tools/",
             json=cobalt_body,
             headers=cobalt_headers,
             timeout=8
@@ -682,29 +681,32 @@ def stream_debug():
             log.error(f"Failed to copy cookies to /tmp in debug: {e}")
             cookies_ok = False
 
-    # Test cookies WITH DEFAULT CLIENT
+    # Test cookies WITH MWEB CLIENT (To trigger PO token generation)
     if cookies_ok:
         try:
             ydl_opts = {
                 "format": "bestaudio/best", "quiet": True,
                 "no_warnings": True, "skip_download": True,
                 "cookiefile": COOKIES_FILE,
+                "extractor_args": {
+                    "youtube": {"player_client": ["mweb"]}
+                }
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(
                     f"https://www.youtube.com/watch?v={test_id}", download=False)
-            results["cookies+default"] = "✅ WORKS" if info.get("url") else "❌ empty"
+            results["cookies+mweb"] = "✅ WORKS" if info.get("url") else "❌ empty"
         except Exception as e:
-            results["cookies+default"] = f"❌ {str(e)[:100]}"
+            results["cookies+mweb"] = f"❌ {str(e)[:100]}"
     else:
-        results["cookies+default"] = f"⚠️  No cookies.txt at '{ORIGINAL_COOKIES}' or failed to copy to /tmp"
+        results["cookies+mweb"] = f"⚠️  No cookies.txt at '{ORIGINAL_COOKIES}' or failed to copy to /tmp"
 
     # Test Cobalt
     try:
         res = requests.post(
-            "https://api.cobalt.tools/api/json",
-            json={"url": f"https://www.youtube.com/watch?v={test_id}", "isAudioOnly": True},
-            headers={"Accept": "application/json", "Content-Type": "application/json"}
+            "https://api.cobalt.tools/",
+            json={"url": f"https://www.youtube.com/watch?v={test_id}", "downloadMode": "audio", "audioFormat": "mp3"},
+            headers={"Accept": "application/json", "Content-Type": "application/json", "User-Agent": "Exyplay/1.0"}
         )
         if res.status_code == 200 and "url" in res.json():
             results["cobalt"] = "✅ WORKS"

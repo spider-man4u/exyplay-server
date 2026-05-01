@@ -500,7 +500,7 @@ def delete_upload_entity(entity_id):
 def get_stream_url(video_id):
     """
     GET /stream/<videoId>
-    Tries web/mweb with cookies, then tv_embedded/android, then Piped — in that order.
+    Tries default yt-dlp behavior, then specific clients, then Piped.
     """
     ORIGINAL_COOKIES = os.getenv("COOKIES_FILE", "/etc/secrets/cookies.txt")
     COOKIES_FILE = "/tmp/cookies.txt"
@@ -523,24 +523,28 @@ def get_stream_url(video_id):
             "quiet":         True,
             "no_warnings":   True,
             "skip_download": True,
-            "extractor_args": {
-                "youtube": {"player_client": [client]}
-            },
         }
+        
+        # Only inject the extractor_args if we are explicitly forcing a specific client
+        if client != "default":
+            opts["extractor_args"] = {
+                "youtube": {"player_client": [client]}
+            }
+            
         if use_cookies and cookies_ok:
             opts["cookiefile"] = COOKIES_FILE
+            
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(yt_url, download=False)
         return info.get("url", ""), info.get("ext", "webm")
 
-    # Attempt order matching Web cookies with Web clients first
+    # Attempt order: Start by letting yt-dlp use its own default client rotation with cookies
     attempts = [
-        ("web",          True),
-        ("mweb",         True),
-        ("android",      True),
-        ("tv_embedded",  True),
-        ("tv_embedded",  False),
-        ("android",      False),
+        ("default",      True),  # 1. Let yt-dlp decide the best client automatically
+        ("web",          True),  # 2. Desktop Web
+        ("mweb",         True),  # 3. Mobile Web
+        ("tv_embedded",  False), # 4. TV without cookies
+        ("android",      False), # 5. Android without cookies
     ]
 
     for client, use_cookies in attempts:
@@ -645,25 +649,24 @@ def stream_debug():
             log.error(f"Failed to copy cookies to /tmp in debug: {e}")
             cookies_ok = False
 
-    # Test cookies
+    # Test cookies WITH DEFAULT CLIENT (no extractor_args override)
     if cookies_ok:
         try:
             ydl_opts = {
                 "format": "bestaudio/best", "quiet": True,
                 "no_warnings": True, "skip_download": True,
                 "cookiefile": COOKIES_FILE,
-                "extractor_args": {"youtube": {"player_client": ["web"]}},
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(
                     f"https://www.youtube.com/watch?v={test_id}", download=False)
-            results["cookies+web"] = "✅ WORKS" if info.get("url") else "❌ empty"
+            results["cookies+default"] = "✅ WORKS" if info.get("url") else "❌ empty"
         except Exception as e:
-            results["cookies+web"] = f"❌ {str(e)[:100]}"
+            results["cookies+default"] = f"❌ {str(e)[:100]}"
     else:
-        results["cookies+web"] = f"⚠️  No cookies.txt at '{ORIGINAL_COOKIES}' or failed to copy to /tmp"
+        results["cookies+default"] = f"⚠️  No cookies.txt at '{ORIGINAL_COOKIES}' or failed to copy to /tmp"
 
-    # Test each client without cookies
+    # Test each specific client without cookies
     for client in ["tv_embedded", "ios", "android", "mweb", "web"]:
         try:
             ydl_opts = {

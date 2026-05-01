@@ -614,6 +614,44 @@ def get_stream_url(video_id):
     )
 
 
+@app.route("/stream/findcookies")
+@handle
+def find_cookies():
+    """GET /stream/findcookies — scan filesystem to locate cookies.txt on Render."""
+    search_paths = [
+        "/etc/secrets/cookies.txt",
+        "/etc/secrets/cookies",
+        "/opt/render/project/src/cookies.txt",
+        "/opt/render/project/cookies.txt",
+        "cookies.txt",
+        os.path.join(os.getcwd(), "cookies.txt"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt"),
+    ]
+    found = {}
+    for p in search_paths:
+        found[p] = "✅ EXISTS" if os.path.exists(p) else "❌ not found"
+
+    secrets_dir = {}
+    if os.path.isdir("/etc/secrets"):
+        try:
+            secrets_dir = {
+                f: f"{os.path.getsize(os.path.join('/etc/secrets', f))} bytes"
+                for f in os.listdir("/etc/secrets")
+            }
+        except Exception as e:
+            secrets_dir = {"error": str(e)}
+    else:
+        secrets_dir = {"note": "/etc/secrets directory does not exist"}
+
+    return ok({
+        "cwd": os.getcwd(),
+        "script_dir": os.path.dirname(os.path.abspath(__file__)),
+        "search_results": found,
+        "etc_secrets_contents": secrets_dir,
+        "env_COOKIES_FILE": os.getenv("COOKIES_FILE", "NOT SET"),
+    })
+
+
 @app.route("/stream/debug")
 @handle
 def stream_debug():

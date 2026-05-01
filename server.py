@@ -508,9 +508,6 @@ def get_stream_url(video_id):
 
     # Render mounts secret files at /etc/secrets/<filename>
     COOKIES_FILE = os.getenv("COOKIES_FILE", "/etc/secrets/cookies.txt")
-    # Fallback to local path for dev
-    if not os.path.exists(COOKIES_FILE):
-        COOKIES_FILE = "cookies.txt"
 
     yt_url = f"https://www.youtube.com/watch?v={video_id}"
 
@@ -659,8 +656,6 @@ def stream_debug():
     test_id = "dQw4w9WgXcQ"
     results = {}
     COOKIES_FILE = os.getenv("COOKIES_FILE", "/etc/secrets/cookies.txt")
-    if not os.path.exists(COOKIES_FILE):
-        COOKIES_FILE = "cookies.txt"
 
     # Test cookies
     if os.path.exists(COOKIES_FILE):

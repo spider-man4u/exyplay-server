@@ -39,21 +39,32 @@ def init_node_and_pot():
     node_dir = "/tmp/nodejs"
     node_bin = os.path.join(node_dir, "bin", "node")
     
-    # 1. Install Node.js if missing
+    # 1. Install Node.js if missing (yt-dlp needs this to decrypt YouTube signatures)
     if not os.path.exists(node_bin):
-        log.info("Downloading Node.js (required for JS challenges & PO Tokens)...")
+        log.info("Downloading Node.js (required for JS challenges)...")
         subprocess.run("curl -sL https://nodejs.org/dist/v20.11.1/node-v20.11.1-linux-x64.tar.xz | tar xJ -C /tmp", shell=True)
         if os.path.exists("/tmp/node-v20.11.1-linux-x64"):
             shutil.move("/tmp/node-v20.11.1-linux-x64", node_dir)
         log.info("Node.js installed.")
 
-    # Add Node to PATH so yt-dlp can find it
+    # Add Node to PATH so yt-dlp can find it automatically
     os.environ["PATH"] = f"{os.path.join(node_dir, 'bin')}:{os.environ.get('PATH', '')}"
 
-    # 2. Install the PO Token Provider globally via NPM
-    if not os.path.exists(os.path.join(node_dir, "bin", "bgutil-ytdlp-pot-provider")):
-        log.info("Installing official bgutil PO Token Provider via npm...")
-        subprocess.run(["npm", "install", "-g", "bgutil-ytdlp-pot-provider"], check=False)
+    # 2. Download the Rust PO Token server binary (bgutil-pot)
+    binary_path = "/tmp/bgutil-pot"
+    if not os.path.exists(binary_path):
+        log.info("Downloading latest bgutil-pot token generator...")
+        url = "https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs/releases/latest/download/bgutil-pot-linux-x86_64"
+        try:
+            import urllib.request
+            import stat
+            urllib.request.urlretrieve(url, binary_path)
+            st = os.stat(binary_path)
+            os.chmod(binary_path, st.st_mode | stat.S_IEXEC)
+            log.info("Successfully downloaded and configured bgutil-pot.")
+        except Exception as e:
+            log.error(f"Failed to download bgutil-pot: {e}")
+            return
 
     # 3. Start the background HTTP server
     try:
@@ -62,7 +73,7 @@ def init_node_and_pot():
     except:
         log.info("Starting bgutil PO Token server on port 4416...")
         subprocess.Popen(
-            ["bgutil-ytdlp-pot-provider", "server", "--port", "4416"],
+            [binary_path, "server", "--port", "4416"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
         import time

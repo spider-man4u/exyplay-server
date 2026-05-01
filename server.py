@@ -33,36 +33,42 @@ class YTDLLogger(object):
     def error(self, msg):
         log.error(f"YT-DLP-ERROR: {msg}")
 
-# ── Auto-Install & Start PO Token Server ─────────────────────────────────────
-def init_pot_server():
-    """Downloads and runs the bgutil-pot token server natively on Render"""
-    binary_path = "/tmp/bgutil-pot"
-    if not os.path.exists(binary_path):
-        log.info("Downloading bgutil-pot token generator (v0.8.1)...")
-        # Pinned to v0.8.1 to match the pip package
-        url = "https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs/releases/download/v0.8.1/bgutil-pot-linux-x86_64"
-        try:
-            import urllib.request
-            import stat
-            urllib.request.urlretrieve(url, binary_path)
-            st = os.stat(binary_path)
-            os.chmod(binary_path, st.st_mode | stat.S_IEXEC)
-            log.info("Successfully downloaded and configured bgutil-pot.")
-        except Exception as e:
-            log.error(f"Failed to download bgutil-pot: {e}")
-            return
+# ── Auto-Install Node.js & PO Token Server ──────────────────────────────────
+def init_node_and_pot():
+    """Downloads Node.js (for JS challenges) and runs the official PO Token server"""
+    node_dir = "/tmp/nodejs"
+    node_bin = os.path.join(node_dir, "bin", "node")
+    
+    # 1. Install Node.js if missing
+    if not os.path.exists(node_bin):
+        log.info("Downloading Node.js (required for JS challenges & PO Tokens)...")
+        subprocess.run("curl -sL https://nodejs.org/dist/v20.11.1/node-v20.11.1-linux-x64.tar.xz | tar xJ -C /tmp", shell=True)
+        if os.path.exists("/tmp/node-v20.11.1-linux-x64"):
+            shutil.move("/tmp/node-v20.11.1-linux-x64", node_dir)
+        log.info("Node.js installed.")
 
+    # Add Node to PATH so yt-dlp can find it
+    os.environ["PATH"] = f"{os.path.join(node_dir, 'bin')}:{os.environ.get('PATH', '')}"
+
+    # 2. Install the PO Token Provider globally via NPM
+    if not os.path.exists(os.path.join(node_dir, "bin", "bgutil-ytdlp-pot-provider")):
+        log.info("Installing official bgutil PO Token Provider via npm...")
+        subprocess.run(["npm", "install", "-g", "bgutil-ytdlp-pot-provider"], check=False)
+
+    # 3. Start the background HTTP server
     try:
-        # Check if already running
         requests.get("http://127.0.0.1:4416", timeout=1)
         log.info("bgutil-pot server is already running.")
     except:
-        log.info("Starting bgutil-pot background server on port 4416...")
-        subprocess.Popen([binary_path, "server", "--port", "4416"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        log.info("Starting bgutil PO Token server on port 4416...")
+        subprocess.Popen(
+            ["bgutil-ytdlp-pot-provider", "server", "--port", "4416"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
         import time
-        time.sleep(2) # Give server time to bind
+        time.sleep(3) # Give server time to boot
 
-init_pot_server()
+init_node_and_pot()
 
 # ── Auth setup ───────────────────────────────────────────────────────────────
 AUTH_FILE = os.getenv("YTMUSIC_AUTH_FILE", "browser.json")
@@ -541,7 +547,6 @@ def delete_upload_entity(entity_id):
 def get_stream_url(video_id):
     """
     GET /stream/<videoId>
-    Tries mweb, web, and ios with PO Token plugin natively.
     """
     ORIGINAL_COOKIES = os.getenv("COOKIES_FILE", "/etc/secrets/cookies.txt")
     COOKIES_FILE = "/tmp/cookies.txt"
@@ -604,44 +609,6 @@ def get_stream_url(video_id):
         503
     )
 
-
-@app.route("/stream/findcookies")
-@handle
-def find_cookies():
-    search_paths = [
-        "/etc/secrets/cookies.txt",
-        "/etc/secrets/cookies",
-        "/opt/render/project/src/cookies.txt",
-        "/opt/render/project/cookies.txt",
-        "cookies.txt",
-        os.path.join(os.getcwd(), "cookies.txt"),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt"),
-    ]
-    found = {}
-    for p in search_paths:
-        found[p] = "✅ EXISTS" if os.path.exists(p) else "❌ not found"
-
-    secrets_dir = {}
-    if os.path.isdir("/etc/secrets"):
-        try:
-            secrets_dir = {
-                f: f"{os.path.getsize(os.path.join('/etc/secrets', f))} bytes"
-                for f in os.listdir("/etc/secrets")
-            }
-        except Exception as e:
-            secrets_dir = {"error": str(e)}
-    else:
-        secrets_dir = {"note": "/etc/secrets directory does not exist"}
-
-    return ok({
-        "cwd": os.getcwd(),
-        "script_dir": os.path.dirname(os.path.abspath(__file__)),
-        "search_results": found,
-        "etc_secrets_contents": secrets_dir,
-        "env_COOKIES_FILE": os.getenv("COOKIES_FILE", "NOT SET"),
-    })
-
-
 @app.route("/stream/debug")
 @handle
 def stream_debug():
@@ -659,7 +626,7 @@ def stream_debug():
             log.error(f"Failed to copy cookies to /tmp in debug: {e}")
             cookies_ok = False
 
-    # Test cookies WITH MWEB CLIENT (To trigger PO token generation)
+    # Test cookies WITH MWEB CLIENT
     if cookies_ok:
         try:
             ydl_opts = {

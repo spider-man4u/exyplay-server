@@ -35,7 +35,7 @@ class YTDLLogger(object):
 
 # ── Auto-Install Node.js & PO Token Server ──────────────────────────────────
 def init_node_and_pot():
-    """Downloads Node.js (for JS challenges) and runs the official PO Token server"""
+    """Downloads Node.js and runs the matched v1.3.1 PO Token server"""
     node_dir = "/tmp/nodejs"
     node_bin = os.path.join(node_dir, "bin", "node")
     
@@ -50,18 +50,19 @@ def init_node_and_pot():
     # Add Node to PATH so yt-dlp can find it automatically
     os.environ["PATH"] = f"{os.path.join(node_dir, 'bin')}:{os.environ.get('PATH', '')}"
 
-    # 2. Download the Rust PO Token server binary (bgutil-pot)
+    # 2. Download the Rust PO Token server binary (PINNED TO 1.3.1)
     binary_path = "/tmp/bgutil-pot"
     if not os.path.exists(binary_path):
-        log.info("Downloading latest bgutil-pot token generator...")
-        url = "https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs/releases/latest/download/bgutil-pot-linux-x86_64"
+        log.info("Downloading bgutil-pot token generator v1.3.1...")
+        # CRITICAL: This URL matches the pip plugin version
+        url = "https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs/releases/download/v1.3.1/bgutil-pot-linux-x86_64"
         try:
             import urllib.request
             import stat
             urllib.request.urlretrieve(url, binary_path)
             st = os.stat(binary_path)
             os.chmod(binary_path, st.st_mode | stat.S_IEXEC)
-            log.info("Successfully downloaded and configured bgutil-pot.")
+            log.info("Successfully downloaded and configured bgutil-pot v1.3.1.")
         except Exception as e:
             log.error(f"Failed to download bgutil-pot: {e}")
             return

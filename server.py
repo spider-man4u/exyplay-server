@@ -7,6 +7,7 @@ Run: python server.py
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
+import shutil
 import json
 import logging
 from functools import wraps
@@ -502,9 +503,18 @@ def get_stream_url(video_id):
     Tries cookies+android, cookies+tv_embedded, bare android,
     bare tv_embedded, then Piped — in that order.
     """
-    COOKIES_FILE = os.getenv("COOKIES_FILE", "/etc/secrets/cookies.txt")
+    ORIGINAL_COOKIES = os.getenv("COOKIES_FILE", "/etc/secrets/cookies.txt")
+    COOKIES_FILE = "/tmp/cookies.txt"
     yt_url       = f"https://www.youtube.com/watch?v={video_id}"
-    cookies_ok   = os.path.exists(COOKIES_FILE)
+    cookies_ok   = os.path.exists(ORIGINAL_COOKIES)
+
+    # COPY COOKIES TO WRITABLE LOCATION
+    if cookies_ok:
+        try:
+            shutil.copy(ORIGINAL_COOKIES, COOKIES_FILE)
+        except Exception as e:
+            log.error(f"Failed to copy cookies to /tmp: {e}")
+            cookies_ok = False
 
     log.info(f"▶ /stream/{video_id}  cookies_file={COOKIES_FILE}  exists={cookies_ok}")
 
@@ -622,10 +632,20 @@ def stream_debug():
     """GET /stream/debug — diagnose which extraction methods work on this IP."""
     test_id = "dQw4w9WgXcQ"
     results = {}
-    COOKIES_FILE = os.getenv("COOKIES_FILE", "/etc/secrets/cookies.txt")
+    ORIGINAL_COOKIES = os.getenv("COOKIES_FILE", "/etc/secrets/cookies.txt")
+    COOKIES_FILE = "/tmp/cookies.txt"
+    cookies_ok = os.path.exists(ORIGINAL_COOKIES)
+
+    # COPY COOKIES TO WRITABLE LOCATION FOR DEBUG ENDPOINT
+    if cookies_ok:
+        try:
+            shutil.copy(ORIGINAL_COOKIES, COOKIES_FILE)
+        except Exception as e:
+            log.error(f"Failed to copy cookies to /tmp in debug: {e}")
+            cookies_ok = False
 
     # Test cookies
-    if os.path.exists(COOKIES_FILE):
+    if cookies_ok:
         try:
             ydl_opts = {
                 "format": "bestaudio/best", "quiet": True,
@@ -640,7 +660,7 @@ def stream_debug():
         except Exception as e:
             results["cookies+web"] = f"❌ {str(e)[:100]}"
     else:
-        results["cookies+web"] = f"⚠️  No cookies.txt at '{COOKIES_FILE}'"
+        results["cookies+web"] = f"⚠️  No cookies.txt at '{ORIGINAL_COOKIES}' or failed to copy to /tmp"
 
     # Test each client without cookies
     for client in ["tv_embedded", "ios", "android", "mweb", "web"]:
@@ -679,8 +699,8 @@ def stream_debug():
     working = [k for k, v in results.items() if v.startswith("✅")]
     return ok({
         "test_video": test_id,
-        "cookies_file": COOKIES_FILE,
-        "cookies_present": os.path.exists(COOKIES_FILE),
+        "cookies_file": COOKIES_FILE if cookies_ok else ORIGINAL_COOKIES,
+        "cookies_present": cookies_ok,
         "results": results,
         "working_methods": working,
         "recommendation": working[0] if working else "NONE — add cookies.txt",

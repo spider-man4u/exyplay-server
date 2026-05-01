@@ -499,45 +499,83 @@ def delete_upload_entity(entity_id):
 def get_stream_url(video_id):
     """
     GET /stream/<videoId>
-    Rotates through multiple public APIs to bypass YouTube bot protection.
+    Rotates through multiple public Piped instances, falls back to yt-dlp.
+    Returns: { "status": "ok", "data": { "url": "...", "ext": "m4a" } }
     """
-    # 🌟 Public Piped instances that act as middle-men to bypass IP bans
     piped_instances = [
         "https://pipedapi.kavin.rocks",
         "https://pipedapi.tokhmi.xyz",
         "https://pipedapi.smnz.de",
-        "https://piped-api.garudalinux.org"
+        "https://piped-api.garudalinux.org",
     ]
-    
-    # Try the proxies first
+
     for base_url in piped_instances:
         try:
-            res = requests.get(f"{base_url}/streams/{video_id}", timeout=4).json()
-            if "error" in res:
-                continue # If this node is blocked, skip to the next one
-                
+            res = requests.get(
+                f"{base_url}/streams/{video_id}",
+                timeout=5,
+                headers={"User-Agent": "Exyplay/1.0"}
+            ).json()
+
+            if "error" in res or "audioStreams" not in res:
+                continue
+
             audio_streams = res.get("audioStreams", [])
-            if audio_streams:
-                # Prioritize m4a/mp4 audio for Exyplayer
-                for stream in audio_streams:
-                    if "mp4" in stream.get("mimeType", "") or "m4a" in stream.get("mimeType", ""):
-                        return {"url": stream["url"]}
-                return {"url": audio_streams[0]["url"]}
-        except Exception:
-            pass # Node timed out, try the next
-            
-    # 🌟 Last Resort Fallback: yt-dlp (In case all nodes are down)
+            if not audio_streams:
+                continue
+
+            chosen_url = None
+            chosen_ext = "m4a"
+
+            # Prefer m4a / mp4 audio
+            for stream in audio_streams:
+                mime = stream.get("mimeType", "")
+                if "mp4" in mime or "m4a" in mime:
+                    chosen_url = stream.get("url")
+                    chosen_ext = "m4a"
+                    break
+
+            # Fall back to first available stream
+            if not chosen_url:
+                chosen_url = audio_streams[0].get("url", "")
+                chosen_ext = "webm"
+
+            if chosen_url:
+                log.info(f"✅ Piped resolved {video_id} via {base_url}")
+                return ok({"url": chosen_url, "ext": chosen_ext, "videoId": video_id})
+
+        except Exception as e:
+            log.warning(f"Piped instance {base_url} failed: {e}")
+            continue
+
+    # ── yt-dlp fallback ──────────────────────────────────────────────────────
+    log.info(f"⚠️  Falling back to yt-dlp for {video_id}")
     ydl_opts = {
-        'format': 'bestaudio[ext=m4a]/bestaudio/best',
-        'quiet': True,
-        'no_warnings': True,
+        "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android"],
+                "skip": ["hls", "dash"],
+            }
+        },
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(
             f"https://www.youtube.com/watch?v={video_id}",
             download=False
         )
-        return {"url": info["url"]}
+
+    stream_url = info.get("url", "")
+    ext        = info.get("ext", "m4a")
+
+    if not stream_url:
+        return err(f"Could not resolve stream for {video_id}", 500)
+
+    log.info(f"✅ yt-dlp resolved {video_id} [{ext}]")
+    return ok({"url": stream_url, "ext": ext, "videoId": video_id})
 
 # ════════════════════════════════════════════════════════════════════════════
 # STATUS

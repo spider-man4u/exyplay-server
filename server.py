@@ -25,7 +25,7 @@ def setup_environment():
     node_dir = "/tmp/nodejs"
     node_bin = os.path.join(node_dir, "bin", "node")
     npm_bin = os.path.join(node_dir, "bin", "npm")
-    npx_bin = os.path.join(node_dir, "bin", "npx")
+    tsc_bin = os.path.join(node_dir, "bin", "tsc")
     
     # 1. Install Node.js (Required for YouTube JS signatures & Token Server)
     if not os.path.exists(node_bin):
@@ -55,11 +55,16 @@ def setup_environment():
         subprocess.run(["git", "clone", "--depth", "1", "https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git", bgutil_repo], check=True)
         
         log.info("Installing NPM dependencies...")
-        subprocess.run([npm_bin, "install"], cwd=server_dir, check=True)
+        # Render sets NODE_ENV=production, which ignores devDependencies like TypeScript
+        # We use --include=dev to force npm to install everything needed to build
+        subprocess.run([npm_bin, "install", "--include=dev"], cwd=server_dir, check=True)
+        
+        log.info("Installing TypeScript globally to avoid npx conflicts...")
+        subprocess.run([npm_bin, "install", "-g", "typescript"], check=True)
         
         log.info("Building TypeScript to JavaScript...")
-        # FIX: The developer uses npx tsc directly instead of npm run build
-        subprocess.run([npx_bin, "tsc"], cwd=server_dir, check=True)
+        # Use the global tsc compiler directly, skipping npx
+        subprocess.run([tsc_bin], cwd=server_dir, check=True)
 
     # 3. Start the background HTTP server
     try:

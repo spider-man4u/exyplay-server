@@ -551,108 +551,205 @@ def delete_upload_entity(entity_id):
     return ok(data)
 
 # ════════════════════════════════════════════════════════════════════════════
-# AUDIO STREAMING (Multi-Node Anti-Bot Router)
+# AUDIO STREAMING  —  YouTube InnerTube API (no yt-dlp, no bot detection)
 # ════════════════════════════════════════════════════════════════════════════
+#
+# YouTube's own InnerTube API is what the official Android/iOS YouTube app
+# uses internally. It is NOT the same endpoint that yt-dlp hits, so it is
+# NOT subject to bot-detection challenges.
+#
+# Endpoint : POST https://www.youtube.com/youtubei/v1/player
+# Client   : ANDROID_MUSIC  (key: AIzaSyAOghZGza2MQSZkY_zfZ370N-PUdXEo8AI)
+# This gives back a direct signed CDN URL valid for ~6 hours.
+# ────────────────────────────────────────────────────────────────────────────
+
+INNERTUBE_API_KEY = "AIzaSyAOghZGza2MQSZkY_zfZ370N-PUdXEo8AI"
+INNERTUBE_URL     = "https://www.youtube.com/youtubei/v1/player"
+
+INNERTUBE_CONTEXT = {
+    "client": {
+        "clientName":    "ANDROID_MUSIC",
+        "clientVersion": "7.27.52",
+        "androidSdkVersion": 30,
+        "userAgent": (
+            "com.google.android.apps.youtube.music/"
+            "7.27.52 (Linux; U; Android 11) gzip"
+        ),
+        "hl": "en",
+        "gl": "US",
+    }
+}
+
+def _fetch_innertube(video_id: str) -> dict:
+    """
+    Call the InnerTube /player endpoint for the ANDROID_MUSIC client.
+    Returns the raw player response dict.
+    """
+    payload = {
+        "context": INNERTUBE_CONTEXT,
+        "videoId": video_id,
+        "playbackContext": {
+            "contentPlaybackContext": {"html5Preference": "HTML5_PREF_WANTS"}
+        },
+        "contentCheckOk": True,
+        "racyCheckOk":    True,
+    }
+    headers = {
+        "Content-Type":  "application/json",
+        "User-Agent":    INNERTUBE_CONTEXT["client"]["userAgent"],
+        "X-YouTube-Client-Name":    "21",
+        "X-YouTube-Client-Version": INNERTUBE_CONTEXT["client"]["clientVersion"],
+        "Origin":  "https://www.youtube.com",
+        "Referer": "https://www.youtube.com/",
+    }
+    resp = requests.post(
+        f"{INNERTUBE_URL}?key={INNERTUBE_API_KEY}",
+        json=payload,
+        headers=headers,
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _best_audio_format(formats: list) -> dict | None:
+    """
+    Pick the best audio-only format from streamingData.adaptiveFormats.
+    Prefer: audio/mp4 (m4a/aac) > audio/webm (opus) > anything audio.
+    Within each type, pick highest bitrate.
+    """
+    audio = [
+        f for f in formats
+        if f.get("mimeType", "").startswith("audio/")
+        and f.get("url")  # must have a direct URL (not ciphered)
+    ]
+    if not audio:
+        return None
+
+    def score(f):
+        mime    = f.get("mimeType", "")
+        bitrate = f.get("averageBitrate", f.get("bitrate", 0))
+        type_score = 2 if "mp4" in mime else (1 if "webm" in mime else 0)
+        return (type_score, bitrate)
+
+    return max(audio, key=score)
+
 
 @app.route("/stream/<video_id>")
 @handle
 def get_stream_url(video_id):
     """
     GET /stream/<videoId>
-    """
-    ORIGINAL_COOKIES = os.getenv("COOKIES_FILE", "/etc/secrets/cookies.txt")
-    COOKIES_FILE = "/tmp/cookies.txt"
-    yt_url       = f"https://www.youtube.com/watch?v={video_id}"
-    cookies_ok   = os.path.exists(ORIGINAL_COOKIES)
 
-    if cookies_ok:
-        try:
-            shutil.copy(ORIGINAL_COOKIES, COOKIES_FILE)
-        except Exception as e:
-            log.error(f"Failed to copy cookies to /tmp: {e}")
-            cookies_ok = False
+    Returns a direct audio stream URL via YouTube's InnerTube ANDROID_MUSIC API.
+    No yt-dlp, no cookies, no bot-detection issues.
 
-    log.info(f"▶ /stream/{video_id}  cookies_file={COOKIES_FILE}  exists={cookies_ok}")
-
-    def try_ytdlp(client, use_cookies):
-        opts = {
-            "format":        "bestaudio/best",
-            "quiet":         False,
-            "no_warnings":   False,
-            "verbose":       True,
-            "logger":        YTDLLogger(),
-            "skip_download": True,
-            "extractor_args": {
-                "youtube": {"player_client": [client]}
-            }
+    Response:
+        {
+          "status": "ok",
+          "data": {
+            "url":     "https://...googlevideo.com/...",
+            "ext":     "m4a",
+            "mime":    "audio/mp4; codecs=\"mp4a.40.2\"",
+            "bitrate": 129000,
+            "videoId": "K7oVZub2KmM"
+          }
         }
-        
-        if use_cookies and cookies_ok:
-            opts["cookiefile"] = COOKIES_FILE
-            
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(yt_url, download=False)
-        return info.get("url", ""), info.get("ext", "webm")
+    """
+    try:
+        player = _fetch_innertube(video_id)
+    except Exception as e:
+        log.error(f"InnerTube fetch failed for {video_id}: {e}")
+        return err(f"InnerTube request failed: {e}", 502)
 
-    attempts = [
-        ("mweb",         True),
-        ("web",          True),
-        ("ios",          True),
-        ("tv_embedded",  False),
-        ("android",      False),
-    ]
+    # Check playability
+    status = player.get("playabilityStatus", {})
+    if status.get("status") not in ("OK", "LIVE_STREAM_OFFLINE"):
+        reason = status.get("reason", "Unknown")
+        log.warning(f"Video {video_id} not playable: {reason}")
+        return err(f"Video not playable: {reason}", 403)
 
-    for client, use_cookies in attempts:
-        label = f"{'cookies+' if use_cookies else ''}{client}"
-        try:
-            url, ext = try_ytdlp(client, use_cookies)
-            if url:
-                log.info(f"✅ {label} → {video_id} [{ext}]")
-                return ok({"url": url, "ext": ext,
-                           "videoId": video_id, "source": label})
-            log.warning(f"⚠️  {label} returned empty URL")
-        except Exception as e:
-            log.warning(f"❌ {label} failed: {e}")
+    streaming = player.get("streamingData", {})
+    formats   = streaming.get("adaptiveFormats", []) + streaming.get("formats", [])
 
-    log.error(f"❌ All strategies exhausted for {video_id}")
-    return err(
-        f"Could not resolve stream for {video_id}. "
-        "Check Render logs for details — run /stream/debug to diagnose.",
-        503
-    )
+    best = _best_audio_format(formats)
+    if not best:
+        log.error(f"No direct audio URL in InnerTube response for {video_id}")
+        # Fallback: return the highest quality combined format URL
+        combined = [f for f in formats if f.get("url")]
+        if combined:
+            best = max(combined, key=lambda f: f.get("bitrate", 0))
+        else:
+            return err(f"No streamable format found for {video_id}", 404)
+
+    mime    = best.get("mimeType", "audio/mp4")
+    ext     = "m4a" if "mp4" in mime else "webm"
+    bitrate = best.get("averageBitrate", best.get("bitrate", 0))
+
+    log.info(f"✅ InnerTube resolved {video_id} [{ext} {bitrate//1000}kbps]")
+
+    return ok({
+        "url":     best["url"],
+        "ext":     ext,
+        "mime":    mime,
+        "bitrate": bitrate,
+        "videoId": video_id,
+        "source":  "innertube",
+    })
+
 
 @app.route("/stream/debug")
 @handle
 def stream_debug():
-    """GET /stream/debug — diagnose which extraction methods work on this IP."""
-    test_id = "dQw4w9WgXcQ"
+    """
+    GET /stream/debug
+    Tests InnerTube extraction on a known video.
+    """
+    test_id = "K7oVZub2KmM"  # Test with a real music track
     results = {}
-    ORIGINAL_COOKIES = os.getenv("COOKIES_FILE", "/etc/secrets/cookies.txt")
-    COOKIES_FILE = "/tmp/cookies.txt"
-    cookies_ok = os.path.exists(ORIGINAL_COOKIES)
 
-    if cookies_ok:
-        try:
-            shutil.copy(ORIGINAL_COOKIES, COOKIES_FILE)
-        except Exception as e:
-            log.error(f"Failed to copy cookies to /tmp in debug: {e}")
-            cookies_ok = False
+    try:
+        player  = _fetch_innertube(test_id)
+        status  = player.get("playabilityStatus", {}).get("status")
+        formats = (
+            player.get("streamingData", {}).get("adaptiveFormats", []) +
+            player.get("streamingData", {}).get("formats", [])
+        )
+        audio   = [f for f in formats if "audio" in f.get("mimeType","") and f.get("url")]
+        best    = _best_audio_format(formats)
 
-    # Test cookies WITH MWEB CLIENT
-    if cookies_ok:
-        try:
-            ydl_opts = {
-                "format": "bestaudio/best", 
-                "quiet": False, 
-                "no_warnings": False, 
-                "verbose": True, 
-                "logger": YTDLLogger(),
-                "skip_download": True,
-                "cookiefile": COOKIES_FILE,
-                "extractor_args": {
-                    "youtube": {"player_client": ["mweb"]}
-                }
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(
-                    f"htt
+        results["innertube"] = {
+            "status":        "✅ WORKS" if best else "❌ no direct URL",
+            "playability":   status,
+            "audio_formats": len(audio),
+            "best_mime":     best.get("mimeType") if best else None,
+            "best_bitrate":  best.get("averageBitrate", best.get("bitrate")) if best else None,
+            "url_preview":   best["url"][:80] + "..." if best and best.get("url") else None,
+        }
+    except Exception as e:
+        results["innertube"] = {"status": f"❌ {e}"}
+
+    return ok({"test_video": test_id, "results": results})
+
+@app.route("/status")
+def status():
+    auth_active = os.path.exists(AUTH_FILE)
+    return jsonify({
+        "status": "ok",
+        "server": "Exyplay Music Server",
+        "version": "1.0.0",
+        "ytmusicapi": "1.11.6",
+        "auth_enabled": auth_active,
+        "auth_file": AUTH_FILE if auth_active else None,
+    })
+
+# ════════════════════════════════════════════════════════════════════════════
+# Entry point
+# ════════════════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 5000))
+    debug = os.getenv("DEBUG", "false").lower() == "true"
+    log.info(f"🎵 Exyplay Music Server starting on port {port}")
+    log.info(f"   Auth: {'✅ ' + AUTH_FILE if os.path.exists(AUTH_FILE) else '⚠️  No auth — public endpoints only'}")
+    app.run(host="0.0.0.0", port=port, debug=debug)

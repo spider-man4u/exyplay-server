@@ -675,7 +675,7 @@ INNERTUBE_CLIENTS = [
 
 
 def _fetch_innertube(video_id: str, client: dict, use_auth: bool = True) -> dict:
-    """Call InnerTube /player with a specific client. Attaches cookie auth if available."""
+    """Call InnerTube /player with a specific client. Cookie auth only works with WEB client."""
     payload = {
         "context":        client["context"],
         "videoId":        video_id,
@@ -699,8 +699,8 @@ def _fetch_innertube(video_id: str, client: dict, use_auth: bool = True) -> dict
         "Referer":                  "https://www.youtube.com/",
     }
 
-    # Attach cookie auth when available — unlocks age-restricted / sign-in-required videos
-    if use_auth and _SAPISID and _YT_COOKIES:
+    # Cookie auth ONLY works with WEB client — mobile clients return 400 with cookies
+    if use_auth and _SAPISID and _YT_COOKIES and client["name"] == "WEB":
         headers["Cookie"]        = _cookies_to_header(_YT_COOKIES)
         headers["Authorization"] = _build_sapisidhash(_SAPISID)
         headers["X-Origin"]      = "https://www.youtube.com"
@@ -743,54 +743,63 @@ def _best_audio_format(formats: list) -> dict | None:
 def get_stream_url(video_id):
     """
     GET /stream/<videoId>
-    Tries each InnerTube client with cookie auth first, then without.
+    Attempt order:
+      1. WEB + cookies (unlocks sign-in-required videos)
+      2. IOS_MUSIC     (no auth — works for most public music)
+      3. ANDROID_MUSIC (no auth — fallback)
+      4. TVHTML5       (no auth — embedded player, no bot check)
     """
     last_error = "No clients attempted"
 
-    # Try with auth first (unlocks sign-in-required videos), then without
-    for use_auth in [True, False]:
-        for client in INNERTUBE_CLIENTS:
-            label = f"{'auth+' if use_auth else ''}{client['name']}"
-            try:
-                player = _fetch_innertube(video_id, client, use_auth=use_auth)
-                status = player.get("playabilityStatus", {})
-                ps     = status.get("status", "UNKNOWN")
+    # Build attempt list: WEB with auth first, then all clients without auth
+    attempts = [("WEB", True)] + [(c["name"], False) for c in INNERTUBE_CLIENTS]
+    client_map = {c["name"]: c for c in INNERTUBE_CLIENTS}
 
-                if ps not in ("OK", "LIVE_STREAM_OFFLINE"):
-                    reason = status.get("reason", ps)
-                    log.warning(f"[{label}] {video_id}: {reason}")
-                    last_error = reason
-                    continue
+    for client_name, use_auth in attempts:
+        client = client_map.get(client_name)
+        if not client:
+            continue
+        label = f"{'auth+' if use_auth else ''}{client_name}"
+        try:
+            player = _fetch_innertube(video_id, client, use_auth=use_auth)
+            status = player.get("playabilityStatus", {})
+            ps     = status.get("status", "UNKNOWN")
 
-                streaming = player.get("streamingData", {})
-                formats   = (streaming.get("adaptiveFormats", []) +
-                             streaming.get("formats", []))
-                best = _best_audio_format(formats)
-                if not best:
-                    candidates = [f for f in formats if f.get("url")]
-                    if candidates:
-                        best = max(candidates, key=lambda f: f.get("bitrate", 0))
+            if ps not in ("OK", "LIVE_STREAM_OFFLINE"):
+                reason = status.get("reason", ps)
+                log.warning(f"[{label}] {video_id}: {reason}")
+                last_error = reason
+                continue
 
-                if best and best.get("url"):
-                    mime    = best.get("mimeType", "audio/mp4")
-                    ext     = "m4a" if "mp4" in mime else "webm"
-                    bitrate = best.get("averageBitrate", best.get("bitrate", 0))
-                    log.info(f"✅ [{label}] {video_id} [{ext} {bitrate//1000}kbps]")
-                    return ok({
-                        "url":     best["url"],
-                        "ext":     ext,
-                        "mime":    mime,
-                        "bitrate": bitrate,
-                        "videoId": video_id,
-                        "source":  label,
-                    })
+            streaming = player.get("streamingData", {})
+            formats   = (streaming.get("adaptiveFormats", []) +
+                         streaming.get("formats", []))
+            best = _best_audio_format(formats)
+            if not best:
+                candidates = [f for f in formats if f.get("url")]
+                if candidates:
+                    best = max(candidates, key=lambda f: f.get("bitrate", 0))
 
-                last_error = "No direct URL in streamingData"
-                log.warning(f"[{label}] no direct URL for {video_id}")
+            if best and best.get("url"):
+                mime    = best.get("mimeType", "audio/mp4")
+                ext     = "m4a" if "mp4" in mime else "webm"
+                bitrate = best.get("averageBitrate", best.get("bitrate", 0))
+                log.info(f"✅ [{label}] {video_id} [{ext} {bitrate//1000}kbps]")
+                return ok({
+                    "url":     best["url"],
+                    "ext":     ext,
+                    "mime":    mime,
+                    "bitrate": bitrate,
+                    "videoId": video_id,
+                    "source":  label,
+                })
 
-            except Exception as e:
-                log.warning(f"[{label}] failed: {e}")
-                last_error = str(e)
+            last_error = "No direct URL in streamingData"
+            log.warning(f"[{label}] no direct URL for {video_id}")
+
+        except Exception as e:
+            log.warning(f"[{label}] failed: {e}")
+            last_error = str(e)
 
     log.error(f"❌ All attempts failed for {video_id}. Last: {last_error}")
     return err(f"Could not resolve stream for {video_id}: {last_error}", 503)
@@ -799,15 +808,24 @@ def get_stream_url(video_id):
 @app.route("/stream/debug")
 @handle
 def stream_debug():
-    """GET /stream/debug — test all clients on the real failing video."""
-    test_id = "mOwGtPp3Bu8"
+    """GET /stream/debug — test all clients."""
+    # Test with a guaranteed-public song AND the previously failing one
+    test_videos = {
+        "public_song": "K7oVZub2KmM",     # Phir Se - should always work
+        "prev_failing": "mOwGtPp3Bu8",    # Video that was failing
+    }
     results = {}
+    client_map = {c["name"]: c for c in INNERTUBE_CLIENTS}
+    attempts = [("WEB", True)] + [(c["name"], False) for c in INNERTUBE_CLIENTS]
 
-    for use_auth in [True, False]:
-        for client in INNERTUBE_CLIENTS:
-            label = f"{'auth+' if use_auth else ''}{client['name']}"
+    for vid_label, vid_id in test_videos.items():
+        results[vid_label] = {}
+        for client_name, use_auth in attempts:
+            client = client_map.get(client_name)
+            if not client: continue
+            label = f"{'auth+' if use_auth else ''}{client_name}"
             try:
-                player  = _fetch_innertube(test_id, client, use_auth=use_auth)
+                player  = _fetch_innertube(vid_id, client, use_auth=use_auth)
                 ps      = player.get("playabilityStatus", {}).get("status", "?")
                 formats = (
                     player.get("streamingData", {}).get("adaptiveFormats", []) +
@@ -816,19 +834,16 @@ def stream_debug():
                 best = _best_audio_format(formats)
                 if best and best.get("url"):
                     br = best.get("averageBitrate", best.get("bitrate", 0))
-                    results[label] = f"✅ {best.get('mimeType','')[:25]} {br//1000}kbps"
+                    results[vid_label][label] = f"✅ {best.get('mimeType','')[:20]} {br//1000}kbps"
                 else:
-                    results[label] = f"❌ playability={ps}, no URL"
+                    results[vid_label][label] = f"❌ ps={ps}, no URL"
             except Exception as e:
-                results[label] = f"❌ {str(e)[:100]}"
+                results[vid_label][label] = f"❌ {str(e)[:80]}"
 
-    working = [k for k, v in results.items() if v.startswith("✅")]
     return ok({
-        "test_video":    test_id,
         "auth_loaded":   bool(_SAPISID),
         "cookies_count": len(_YT_COOKIES),
         "results":       results,
-        "working":       working,
     })
 
 @app.route("/status")

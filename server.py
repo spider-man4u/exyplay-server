@@ -25,6 +25,7 @@ def setup_environment():
     node_dir = "/tmp/nodejs"
     node_bin = os.path.join(node_dir, "bin", "node")
     npm_bin = os.path.join(node_dir, "bin", "npm")
+    npx_bin = os.path.join(node_dir, "bin", "npx")
     
     # 1. Install Node.js (Required for YouTube JS signatures & Token Server)
     if not os.path.exists(node_bin):
@@ -57,7 +58,8 @@ def setup_environment():
         subprocess.run([npm_bin, "install"], cwd=server_dir, check=True)
         
         log.info("Building TypeScript to JavaScript...")
-        subprocess.run([npm_bin, "run", "build"], cwd=server_dir, check=True)
+        # FIX: The developer uses npx tsc directly instead of npm run build
+        subprocess.run([npx_bin, "tsc"], cwd=server_dir, check=True)
 
     # 3. Start the background HTTP server
     try:
@@ -408,7 +410,8 @@ def get_stream_url(video_id):
             "no_warnings":   True, 
             "skip_download": True,
             "extractor_args": {
-                "youtube": {"player_client": [client]}
+                "youtube": {"player_client": [client]},
+                "pot": {"bgutil": ["base_url=http://127.0.0.1:4416"]} # Explicitly tell plugin where to look
             }
         }
         
@@ -461,7 +464,8 @@ def stream_debug():
                 "quiet": False, "no_warnings": False, "verbose": True, "logger": YTDLLogger(),
                 "skip_download": True, "cookiefile": COOKIES_FILE,
                 "extractor_args": {
-                    "youtube": {"player_client": ["mweb"]}
+                    "youtube": {"player_client": ["mweb"]},
+                    "pot": {"bgutil": ["base_url=http://127.0.0.1:4416"]}
                 }
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:

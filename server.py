@@ -566,10 +566,54 @@ def delete_upload_entity(entity_id):
 INNERTUBE_API_KEY = "AIzaSyAOghZGza2MQSZkY_zfZ370N-PUdXEo8AI"
 INNERTUBE_URL     = "https://www.youtube.com/youtubei/v1/player"
 
-# Multiple client configs to try in order — different clients bypass different restrictions
+# ── Load cookies from Render secret file ─────────────────────────────────────
+def _load_cookies_dict(path: str) -> dict:
+    """Parse Netscape cookies.txt → dict of {name: value} for youtube.com"""
+    cookies = {}
+    if not os.path.exists(path):
+        return cookies
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) < 7:
+                    continue
+                domain, _, _, _, _, name, value = parts[:7]
+                if "youtube.com" in domain or "google.com" in domain:
+                    cookies[name] = value
+    except Exception as e:
+        log.warning(f"Failed to parse cookies: {e}")
+    return cookies
+
+
+def _build_sapisidhash(sapisid: str) -> str:
+    """Build SAPISIDHASH for InnerTube Authorization header."""
+    import hashlib, time
+    ts = str(int(time.time()))
+    digest = hashlib.sha1(
+        f"{ts} {sapisid} https://www.youtube.com".encode()
+    ).hexdigest()
+    return f"SAPISIDHASH {ts}_{digest}"
+
+
+def _cookies_to_header(cookies: dict) -> str:
+    """Build Cookie header string from dict."""
+    return "; ".join(f"{k}={v}" for k, v in cookies.items())
+
+
+# Load once at startup
+_COOKIES_PATH = os.getenv("COOKIES_FILE", "/etc/secrets/cookies.txt")
+_YT_COOKIES   = _load_cookies_dict(_COOKIES_PATH)
+_SAPISID      = _YT_COOKIES.get("SAPISID", "")
+log.info(f"🍪 Loaded {len(_YT_COOKIES)} YouTube cookies. SAPISID={'✅' if _SAPISID else '❌ missing'}")
+
+
+# Multiple client configs — tried in order
 INNERTUBE_CLIENTS = [
     {
-        # iOS YouTube Music — works for most music, bypasses sign-in wall
         "name": "IOS_MUSIC",
         "key":  "AIzaSyAOghZGza2MQSZkY_zfZ370N-PUdXEo8AI",
         "context": {
@@ -587,7 +631,6 @@ INNERTUBE_CLIENTS = [
         "client_name_id": "26",
     },
     {
-        # Android YouTube Music — good fallback
         "name": "ANDROID_MUSIC",
         "key":  "AIzaSyAOghZGza2MQSZkY_zfZ370N-PUdXEo8AI",
         "context": {
@@ -602,7 +645,6 @@ INNERTUBE_CLIENTS = [
         "client_name_id": "21",
     },
     {
-        # TV embedded — no sign-in check, works even for restricted videos
         "name": "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
         "key":  "AIzaSyAOghZGza2MQSZkY_zfZ370N-PUdXEo8AI",
         "context": {
@@ -611,45 +653,40 @@ INNERTUBE_CLIENTS = [
                 "clientVersion": "2.0",
                 "hl": "en", "gl": "US",
             },
-            "thirdParty": {
-                "embedUrl": "https://www.youtube.com/"
-            }
+            "thirdParty": {"embedUrl": "https://www.youtube.com/"}
         },
-        "user_agent": "Mozilla/5.0 (SMART-TV; Linux; Tizen 6.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/6.0 TV Safari/538.1",
+        "user_agent": "Mozilla/5.0 (SMART-TV; Linux; Tizen 6.0) AppleWebKit/538.1",
         "client_name_id": "85",
     },
     {
-        # Android — broad compatibility
-        "name": "ANDROID",
-        "key":  "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w",
+        "name": "WEB",
+        "key":  "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
         "context": {
             "client": {
-                "clientName":        "ANDROID",
-                "clientVersion":     "19.29.37",
-                "androidSdkVersion": 30,
+                "clientName":    "WEB",
+                "clientVersion": "2.20240726.00.00",
                 "hl": "en", "gl": "US",
             }
         },
-        "user_agent": "com.google.android.youtube/19.29.37 (Linux; U; Android 11) gzip",
-        "client_name_id": "3",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "client_name_id": "1",
     },
 ]
 
 
-def _fetch_innertube(video_id: str, client: dict) -> dict:
-    """Call InnerTube /player with a specific client config."""
+def _fetch_innertube(video_id: str, client: dict, use_auth: bool = True) -> dict:
+    """Call InnerTube /player with a specific client. Attaches cookie auth if available."""
     payload = {
-        "context":  client["context"],
-        "videoId":  video_id,
+        "context":        client["context"],
+        "videoId":        video_id,
         "contentCheckOk": True,
         "racyCheckOk":    True,
     }
-    # TV embedded needs thirdParty in payload too
     if client["name"] == "TVHTML5_SIMPLY_EMBEDDED_PLAYER":
         payload["playbackContext"] = {
             "contentPlaybackContext": {
                 "signatureTimestamp": 20000,
-                "html5Preference": "HTML5_PREF_WANTS",
+                "html5Preference":    "HTML5_PREF_WANTS",
             }
         }
 
@@ -661,6 +698,13 @@ def _fetch_innertube(video_id: str, client: dict) -> dict:
         "Origin":                   "https://www.youtube.com",
         "Referer":                  "https://www.youtube.com/",
     }
+
+    # Attach cookie auth when available — unlocks age-restricted / sign-in-required videos
+    if use_auth and _SAPISID and _YT_COOKIES:
+        headers["Cookie"]        = _cookies_to_header(_YT_COOKIES)
+        headers["Authorization"] = _build_sapisidhash(_SAPISID)
+        headers["X-Origin"]      = "https://www.youtube.com"
+
     resp = requests.post(
         f"{INNERTUBE_URL}?key={client['key']}",
         json=payload,
@@ -699,91 +743,92 @@ def _best_audio_format(formats: list) -> dict | None:
 def get_stream_url(video_id):
     """
     GET /stream/<videoId>
-    Tries multiple InnerTube clients until one returns a playable URL.
+    Tries each InnerTube client with cookie auth first, then without.
     """
     last_error = "No clients attempted"
 
-    for client in INNERTUBE_CLIENTS:
-        try:
-            player  = _fetch_innertube(video_id, client)
-            status  = player.get("playabilityStatus", {})
-            ps      = status.get("status", "UNKNOWN")
+    # Try with auth first (unlocks sign-in-required videos), then without
+    for use_auth in [True, False]:
+        for client in INNERTUBE_CLIENTS:
+            label = f"{'auth+' if use_auth else ''}{client['name']}"
+            try:
+                player = _fetch_innertube(video_id, client, use_auth=use_auth)
+                status = player.get("playabilityStatus", {})
+                ps     = status.get("status", "UNKNOWN")
 
-            if ps not in ("OK", "LIVE_STREAM_OFFLINE"):
-                reason = status.get("reason", ps)
-                log.warning(f"[{client['name']}] {video_id} not playable: {reason}")
-                last_error = reason
-                continue
+                if ps not in ("OK", "LIVE_STREAM_OFFLINE"):
+                    reason = status.get("reason", ps)
+                    log.warning(f"[{label}] {video_id}: {reason}")
+                    last_error = reason
+                    continue
 
-            streaming = player.get("streamingData", {})
-            formats   = (streaming.get("adaptiveFormats", []) +
-                         streaming.get("formats", []))
+                streaming = player.get("streamingData", {})
+                formats   = (streaming.get("adaptiveFormats", []) +
+                             streaming.get("formats", []))
+                best = _best_audio_format(formats)
+                if not best:
+                    candidates = [f for f in formats if f.get("url")]
+                    if candidates:
+                        best = max(candidates, key=lambda f: f.get("bitrate", 0))
 
-            best = _best_audio_format(formats)
-            if not best:
-                # Try any format with a URL as last resort
-                candidates = [f for f in formats if f.get("url")]
-                if candidates:
-                    best = max(candidates, key=lambda f: f.get("bitrate", 0))
+                if best and best.get("url"):
+                    mime    = best.get("mimeType", "audio/mp4")
+                    ext     = "m4a" if "mp4" in mime else "webm"
+                    bitrate = best.get("averageBitrate", best.get("bitrate", 0))
+                    log.info(f"✅ [{label}] {video_id} [{ext} {bitrate//1000}kbps]")
+                    return ok({
+                        "url":     best["url"],
+                        "ext":     ext,
+                        "mime":    mime,
+                        "bitrate": bitrate,
+                        "videoId": video_id,
+                        "source":  label,
+                    })
 
-            if best and best.get("url"):
-                mime    = best.get("mimeType", "audio/mp4")
-                ext     = "m4a" if "mp4" in mime else "webm"
-                bitrate = best.get("averageBitrate", best.get("bitrate", 0))
-                log.info(f"✅ [{client['name']}] {video_id} [{ext} {bitrate//1000}kbps]")
-                return ok({
-                    "url":     best["url"],
-                    "ext":     ext,
-                    "mime":    mime,
-                    "bitrate": bitrate,
-                    "videoId": video_id,
-                    "source":  client["name"],
-                })
+                last_error = "No direct URL in streamingData"
+                log.warning(f"[{label}] no direct URL for {video_id}")
 
-            log.warning(f"[{client['name']}] no direct URL in formats for {video_id}")
-            last_error = "No direct URL in streamingData"
+            except Exception as e:
+                log.warning(f"[{label}] failed: {e}")
+                last_error = str(e)
 
-        except Exception as e:
-            log.warning(f"[{client['name']}] failed for {video_id}: {e}")
-            last_error = str(e)
-
-    log.error(f"❌ All clients failed for {video_id}. Last error: {last_error}")
+    log.error(f"❌ All attempts failed for {video_id}. Last: {last_error}")
     return err(f"Could not resolve stream for {video_id}: {last_error}", 503)
 
 
 @app.route("/stream/debug")
 @handle
 def stream_debug():
-    """GET /stream/debug — test all InnerTube clients on a real music track."""
-    test_id = "OtWjS4I2ojU"  # The exact video that was failing
+    """GET /stream/debug — test all clients on the real failing video."""
+    test_id = "mOwGtPp3Bu8"
     results = {}
 
-    for client in INNERTUBE_CLIENTS:
-        try:
-            player  = _fetch_innertube(test_id, client)
-            ps      = player.get("playabilityStatus", {}).get("status", "?")
-            formats = (
-                player.get("streamingData", {}).get("adaptiveFormats", []) +
-                player.get("streamingData", {}).get("formats", [])
-            )
-            best = _best_audio_format(formats)
-            if best and best.get("url"):
-                mime = best.get("mimeType","")
-                br   = best.get("averageBitrate", best.get("bitrate",0))
-                results[client["name"]] = (
-                    f"✅ WORKS — {mime[:30]} {br//1000}kbps"
+    for use_auth in [True, False]:
+        for client in INNERTUBE_CLIENTS:
+            label = f"{'auth+' if use_auth else ''}{client['name']}"
+            try:
+                player  = _fetch_innertube(test_id, client, use_auth=use_auth)
+                ps      = player.get("playabilityStatus", {}).get("status", "?")
+                formats = (
+                    player.get("streamingData", {}).get("adaptiveFormats", []) +
+                    player.get("streamingData", {}).get("formats", [])
                 )
-            else:
-                results[client["name"]] = f"❌ playability={ps}, no direct URL"
-        except Exception as e:
-            results[client["name"]] = f"❌ {str(e)[:120]}"
+                best = _best_audio_format(formats)
+                if best and best.get("url"):
+                    br = best.get("averageBitrate", best.get("bitrate", 0))
+                    results[label] = f"✅ {best.get('mimeType','')[:25]} {br//1000}kbps"
+                else:
+                    results[label] = f"❌ playability={ps}, no URL"
+            except Exception as e:
+                results[label] = f"❌ {str(e)[:100]}"
 
-    working = [k for k,v in results.items() if v.startswith("✅")]
+    working = [k for k, v in results.items() if v.startswith("✅")]
     return ok({
-        "test_video": test_id,
-        "results":    results,
-        "working":    working,
-        "recommended": working[0] if working else "NONE",
+        "test_video":    test_id,
+        "auth_loaded":   bool(_SAPISID),
+        "cookies_count": len(_YT_COOKIES),
+        "results":       results,
+        "working":       working,
     })
 
 @app.route("/status")

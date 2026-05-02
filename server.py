@@ -566,44 +566,103 @@ def delete_upload_entity(entity_id):
 INNERTUBE_API_KEY = "AIzaSyAOghZGza2MQSZkY_zfZ370N-PUdXEo8AI"
 INNERTUBE_URL     = "https://www.youtube.com/youtubei/v1/player"
 
-INNERTUBE_CONTEXT = {
-    "client": {
-        "clientName":    "ANDROID_MUSIC",
-        "clientVersion": "7.27.52",
-        "androidSdkVersion": 30,
-        "userAgent": (
-            "com.google.android.apps.youtube.music/"
-            "7.27.52 (Linux; U; Android 11) gzip"
-        ),
-        "hl": "en",
-        "gl": "US",
-    }
-}
-
-def _fetch_innertube(video_id: str) -> dict:
-    """
-    Call the InnerTube /player endpoint for the ANDROID_MUSIC client.
-    Returns the raw player response dict.
-    """
-    payload = {
-        "context": INNERTUBE_CONTEXT,
-        "videoId": video_id,
-        "playbackContext": {
-            "contentPlaybackContext": {"html5Preference": "HTML5_PREF_WANTS"}
+# Multiple client configs to try in order — different clients bypass different restrictions
+INNERTUBE_CLIENTS = [
+    {
+        # iOS YouTube Music — works for most music, bypasses sign-in wall
+        "name": "IOS_MUSIC",
+        "key":  "AIzaSyAOghZGza2MQSZkY_zfZ370N-PUdXEo8AI",
+        "context": {
+            "client": {
+                "clientName":    "IOS_MUSIC",
+                "clientVersion": "7.08.2",
+                "deviceMake":    "Apple",
+                "deviceModel":   "iPhone16,2",
+                "osName":        "iPhone",
+                "osVersion":     "18.1.0.22B83",
+                "hl": "en", "gl": "US",
+            }
         },
+        "user_agent": "com.google.ios.youtubemusic/7.08.2 (iPhone; CPU iPhone OS 18_1 like Mac OS X)",
+        "client_name_id": "26",
+    },
+    {
+        # Android YouTube Music — good fallback
+        "name": "ANDROID_MUSIC",
+        "key":  "AIzaSyAOghZGza2MQSZkY_zfZ370N-PUdXEo8AI",
+        "context": {
+            "client": {
+                "clientName":        "ANDROID_MUSIC",
+                "clientVersion":     "7.27.52",
+                "androidSdkVersion": 30,
+                "hl": "en", "gl": "US",
+            }
+        },
+        "user_agent": "com.google.android.apps.youtube.music/7.27.52 (Linux; U; Android 11) gzip",
+        "client_name_id": "21",
+    },
+    {
+        # TV embedded — no sign-in check, works even for restricted videos
+        "name": "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+        "key":  "AIzaSyAOghZGza2MQSZkY_zfZ370N-PUdXEo8AI",
+        "context": {
+            "client": {
+                "clientName":    "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+                "clientVersion": "2.0",
+                "hl": "en", "gl": "US",
+            },
+            "thirdParty": {
+                "embedUrl": "https://www.youtube.com/"
+            }
+        },
+        "user_agent": "Mozilla/5.0 (SMART-TV; Linux; Tizen 6.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/6.0 TV Safari/538.1",
+        "client_name_id": "85",
+    },
+    {
+        # Android — broad compatibility
+        "name": "ANDROID",
+        "key":  "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w",
+        "context": {
+            "client": {
+                "clientName":        "ANDROID",
+                "clientVersion":     "19.29.37",
+                "androidSdkVersion": 30,
+                "hl": "en", "gl": "US",
+            }
+        },
+        "user_agent": "com.google.android.youtube/19.29.37 (Linux; U; Android 11) gzip",
+        "client_name_id": "3",
+    },
+]
+
+
+def _fetch_innertube(video_id: str, client: dict) -> dict:
+    """Call InnerTube /player with a specific client config."""
+    payload = {
+        "context":  client["context"],
+        "videoId":  video_id,
         "contentCheckOk": True,
         "racyCheckOk":    True,
     }
+    # TV embedded needs thirdParty in payload too
+    if client["name"] == "TVHTML5_SIMPLY_EMBEDDED_PLAYER":
+        payload["playbackContext"] = {
+            "contentPlaybackContext": {
+                "signatureTimestamp": 20000,
+                "html5Preference": "HTML5_PREF_WANTS",
+            }
+        }
+
     headers = {
-        "Content-Type":  "application/json",
-        "User-Agent":    INNERTUBE_CONTEXT["client"]["userAgent"],
-        "X-YouTube-Client-Name":    "21",
-        "X-YouTube-Client-Version": INNERTUBE_CONTEXT["client"]["clientVersion"],
-        "Origin":  "https://www.youtube.com",
-        "Referer": "https://www.youtube.com/",
+        "Content-Type":             "application/json",
+        "User-Agent":               client["user_agent"],
+        "X-YouTube-Client-Name":    client["client_name_id"],
+        "X-YouTube-Client-Version": client["context"]["client"]["clientVersion"],
+        "Origin":                   "https://www.youtube.com",
+        "Referer":                  "https://www.youtube.com/",
     }
     resp = requests.post(
-        f"{INNERTUBE_URL}?key={INNERTUBE_API_KEY}",
+        f"{INNERTUBE_URL}?key={client['key']}",
         json=payload,
         headers=headers,
         timeout=10,
@@ -640,96 +699,92 @@ def _best_audio_format(formats: list) -> dict | None:
 def get_stream_url(video_id):
     """
     GET /stream/<videoId>
-
-    Returns a direct audio stream URL via YouTube's InnerTube ANDROID_MUSIC API.
-    No yt-dlp, no cookies, no bot-detection issues.
-
-    Response:
-        {
-          "status": "ok",
-          "data": {
-            "url":     "https://...googlevideo.com/...",
-            "ext":     "m4a",
-            "mime":    "audio/mp4; codecs=\"mp4a.40.2\"",
-            "bitrate": 129000,
-            "videoId": "K7oVZub2KmM"
-          }
-        }
+    Tries multiple InnerTube clients until one returns a playable URL.
     """
-    try:
-        player = _fetch_innertube(video_id)
-    except Exception as e:
-        log.error(f"InnerTube fetch failed for {video_id}: {e}")
-        return err(f"InnerTube request failed: {e}", 502)
+    last_error = "No clients attempted"
 
-    # Check playability
-    status = player.get("playabilityStatus", {})
-    if status.get("status") not in ("OK", "LIVE_STREAM_OFFLINE"):
-        reason = status.get("reason", "Unknown")
-        log.warning(f"Video {video_id} not playable: {reason}")
-        return err(f"Video not playable: {reason}", 403)
+    for client in INNERTUBE_CLIENTS:
+        try:
+            player  = _fetch_innertube(video_id, client)
+            status  = player.get("playabilityStatus", {})
+            ps      = status.get("status", "UNKNOWN")
 
-    streaming = player.get("streamingData", {})
-    formats   = streaming.get("adaptiveFormats", []) + streaming.get("formats", [])
+            if ps not in ("OK", "LIVE_STREAM_OFFLINE"):
+                reason = status.get("reason", ps)
+                log.warning(f"[{client['name']}] {video_id} not playable: {reason}")
+                last_error = reason
+                continue
 
-    best = _best_audio_format(formats)
-    if not best:
-        log.error(f"No direct audio URL in InnerTube response for {video_id}")
-        # Fallback: return the highest quality combined format URL
-        combined = [f for f in formats if f.get("url")]
-        if combined:
-            best = max(combined, key=lambda f: f.get("bitrate", 0))
-        else:
-            return err(f"No streamable format found for {video_id}", 404)
+            streaming = player.get("streamingData", {})
+            formats   = (streaming.get("adaptiveFormats", []) +
+                         streaming.get("formats", []))
 
-    mime    = best.get("mimeType", "audio/mp4")
-    ext     = "m4a" if "mp4" in mime else "webm"
-    bitrate = best.get("averageBitrate", best.get("bitrate", 0))
+            best = _best_audio_format(formats)
+            if not best:
+                # Try any format with a URL as last resort
+                candidates = [f for f in formats if f.get("url")]
+                if candidates:
+                    best = max(candidates, key=lambda f: f.get("bitrate", 0))
 
-    log.info(f"✅ InnerTube resolved {video_id} [{ext} {bitrate//1000}kbps]")
+            if best and best.get("url"):
+                mime    = best.get("mimeType", "audio/mp4")
+                ext     = "m4a" if "mp4" in mime else "webm"
+                bitrate = best.get("averageBitrate", best.get("bitrate", 0))
+                log.info(f"✅ [{client['name']}] {video_id} [{ext} {bitrate//1000}kbps]")
+                return ok({
+                    "url":     best["url"],
+                    "ext":     ext,
+                    "mime":    mime,
+                    "bitrate": bitrate,
+                    "videoId": video_id,
+                    "source":  client["name"],
+                })
 
-    return ok({
-        "url":     best["url"],
-        "ext":     ext,
-        "mime":    mime,
-        "bitrate": bitrate,
-        "videoId": video_id,
-        "source":  "innertube",
-    })
+            log.warning(f"[{client['name']}] no direct URL in formats for {video_id}")
+            last_error = "No direct URL in streamingData"
+
+        except Exception as e:
+            log.warning(f"[{client['name']}] failed for {video_id}: {e}")
+            last_error = str(e)
+
+    log.error(f"❌ All clients failed for {video_id}. Last error: {last_error}")
+    return err(f"Could not resolve stream for {video_id}: {last_error}", 503)
 
 
 @app.route("/stream/debug")
 @handle
 def stream_debug():
-    """
-    GET /stream/debug
-    Tests InnerTube extraction on a known video.
-    """
-    test_id = "K7oVZub2KmM"  # Test with a real music track
+    """GET /stream/debug — test all InnerTube clients on a real music track."""
+    test_id = "OtWjS4I2ojU"  # The exact video that was failing
     results = {}
 
-    try:
-        player  = _fetch_innertube(test_id)
-        status  = player.get("playabilityStatus", {}).get("status")
-        formats = (
-            player.get("streamingData", {}).get("adaptiveFormats", []) +
-            player.get("streamingData", {}).get("formats", [])
-        )
-        audio   = [f for f in formats if "audio" in f.get("mimeType","") and f.get("url")]
-        best    = _best_audio_format(formats)
+    for client in INNERTUBE_CLIENTS:
+        try:
+            player  = _fetch_innertube(test_id, client)
+            ps      = player.get("playabilityStatus", {}).get("status", "?")
+            formats = (
+                player.get("streamingData", {}).get("adaptiveFormats", []) +
+                player.get("streamingData", {}).get("formats", [])
+            )
+            best = _best_audio_format(formats)
+            if best and best.get("url"):
+                mime = best.get("mimeType","")
+                br   = best.get("averageBitrate", best.get("bitrate",0))
+                results[client["name"]] = (
+                    f"✅ WORKS — {mime[:30]} {br//1000}kbps"
+                )
+            else:
+                results[client["name"]] = f"❌ playability={ps}, no direct URL"
+        except Exception as e:
+            results[client["name"]] = f"❌ {str(e)[:120]}"
 
-        results["innertube"] = {
-            "status":        "✅ WORKS" if best else "❌ no direct URL",
-            "playability":   status,
-            "audio_formats": len(audio),
-            "best_mime":     best.get("mimeType") if best else None,
-            "best_bitrate":  best.get("averageBitrate", best.get("bitrate")) if best else None,
-            "url_preview":   best["url"][:80] + "..." if best and best.get("url") else None,
-        }
-    except Exception as e:
-        results["innertube"] = {"status": f"❌ {e}"}
-
-    return ok({"test_video": test_id, "results": results})
+    working = [k for k,v in results.items() if v.startswith("✅")]
+    return ok({
+        "test_video": test_id,
+        "results":    results,
+        "working":    working,
+        "recommended": working[0] if working else "NONE",
+    })
 
 @app.route("/status")
 def status():
